@@ -31,7 +31,7 @@ describe("claude-code provider plugin", () => {
     expect(prov.models).toHaveLength(3);
 
     const ids = prov.models.map((m) => m.id);
-    expect(ids).toEqual(["sonnet", "opus", "haiku"]);
+    expect(ids).toEqual(["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5-20251001"]);
 
     // All costs should be zero (billed through Claude Code subscription)
     for (const model of prov.models) {

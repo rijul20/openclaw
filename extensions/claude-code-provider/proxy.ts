@@ -1,92 +1,64 @@
 /**
- * Local HTTP proxy that speaks the Anthropic Messages API protocol.
+ * Local HTTP proxy that forwards Anthropic Messages API requests to
+ * api.anthropic.com using the Claude Code subscription's OAuth token.
  *
- * Maintains a persistent Claude Code session (one subprocess) and routes
- * each incoming request through it. First request pays the subprocess
- * startup cost (~5-8s); subsequent requests only pay API TTFB (~2-4s).
+ * This gives full Anthropic API compatibility — tools, streaming,
+ * thinking, images — using the user's Claude Code subscription billing
+ * instead of a separate API key.
+ *
+ * The OAuth token is read from the macOS Keychain (Claude Code stores it
+ * under "Claude Code-credentials"). Token refresh is handled by falling
+ * back to the Claude Code SDK when the token expires.
  */
 
+import { execSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 const PROXY_PORT = 18990;
+const ANTHROPIC_API_BASE = "https://api.anthropic.com";
+const ANTHROPIC_API_VERSION = "2023-06-01";
 
 let serverInstance: ReturnType<typeof createServer> | null = null;
+let cachedToken: string | null = null;
 
-type SdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
-let sdkModule: SdkModule | null = null;
-
-// Persistent session state
-let session: {
-  sdk: SdkModule;
-  handle: ReturnType<SdkModule["unstable_v2_createSession"]>;
-  streamIter: AsyncGenerator<unknown, void> | null;
-  model: string;
-} | null = null;
-
-async function loadSdk(): Promise<SdkModule> {
-  if (!sdkModule) {
-    sdkModule = await import("@anthropic-ai/claude-agent-sdk");
+/**
+ * Read the OAuth access token from the macOS Keychain.
+ */
+function readTokenFromKeychain(): string | null {
+  try {
+    const raw = execSync('security find-generic-password -s "Claude Code-credentials" -w', {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    const parsed = JSON.parse(raw) as {
+      claudeAiOauth?: { accessToken?: string };
+    };
+    return parsed.claudeAiOauth?.accessToken ?? null;
+  } catch {
+    return null;
   }
-  return sdkModule;
-}
-
-function resolveModelName(model: string): string {
-  if (model.includes("opus")) return "opus";
-  if (model.includes("haiku")) return "haiku";
-  return "sonnet";
 }
 
 /**
- * Get or create a persistent Claude Code session.
- *
- * The session stays alive across requests. If the model changes, we close
- * the old session and create a new one.
+ * Get the OAuth token, using cache for performance.
  */
-async function getOrCreateSession(model: string) {
-  if (session && session.model === model) {
-    return session;
+function getToken(): string {
+  if (cachedToken) return cachedToken;
+  const token = readTokenFromKeychain();
+  if (!token) {
+    throw new Error(
+      "Claude Code OAuth token not found in Keychain. Make sure Claude Code is installed and authenticated.",
+    );
   }
+  cachedToken = token;
+  return token;
+}
 
-  // Close existing session if model changed
-  if (session) {
-    try {
-      session.handle.close();
-    } catch {
-      // ignore
-    }
-    session = null;
-  }
-
-  const sdk = await loadSdk();
-  const handle = sdk.unstable_v2_createSession({
-    model,
-    disallowedTools: [
-      "Read",
-      "Write",
-      "Edit",
-      "MultiEdit",
-      "Bash",
-      "Glob",
-      "Grep",
-      "WebFetch",
-      "WebSearch",
-      "TodoRead",
-      "TodoWrite",
-      "NotebookRead",
-      "NotebookEdit",
-      "Agent",
-      "AskUserQuestion",
-    ],
-    permissionMode: "plan", // no tool execution
-  });
-
-  // Start the stream iterator — it won't yield until send() is called
-  const streamIter = handle.stream();
-
-  console.error(`[claude-code-proxy] session created (model=${model})`);
-
-  session = { sdk, handle, streamIter, model };
-  return session;
+/**
+ * Invalidate the cached token (e.g. on 401 response).
+ */
+function invalidateToken() {
+  cachedToken = null;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -98,276 +70,96 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function extractPromptText(
-  messages: Array<{ role: string; content: unknown }>,
-  systemPrompt?: string,
-): string {
-  const parts: string[] = [];
-  if (systemPrompt) {
-    parts.push(systemPrompt);
-  }
-  for (const msg of messages) {
-    const text =
-      typeof msg.content === "string"
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? (msg.content as Array<{ type: string; text?: string }>)
-              .filter((b) => b.type === "text" && b.text)
-              .map((b) => b.text)
-              .join("\n")
-          : "";
-    if (!text) continue;
-    if (msg.role === "user") {
-      parts.push(`Human: ${text}`);
-    } else if (msg.role === "assistant") {
-      parts.push(`Assistant: ${text}`);
-    }
-  }
-  return parts.join("\n\n");
-}
-
+/**
+ * Forward an Anthropic Messages API request to api.anthropic.com
+ * with the Claude Code OAuth token.
+ */
 async function handleMessages(req: IncomingMessage, res: ServerResponse) {
-  const body = JSON.parse(await readBody(req));
-  const isStreaming = body.stream === true;
-  const modelName = resolveModelName(body.model ?? "sonnet");
-  const systemPrompt =
-    typeof body.system === "string"
-      ? body.system
-      : Array.isArray(body.system)
-        ? (body.system as Array<{ text?: string }>).map((b) => b.text ?? "").join("\n")
-        : undefined;
-  const prompt = extractPromptText(body.messages ?? [], systemPrompt);
+  const body = await readBody(req);
+  const token = getToken();
 
-  let sess: Awaited<ReturnType<typeof getOrCreateSession>>;
-  try {
-    sess = await getOrCreateSession(modelName);
-  } catch (err) {
-    // Session creation failed — fall back to one-shot query()
-    console.error(
-      "[claude-code-proxy] session creation failed, using one-shot:",
-      err instanceof Error ? err.message : err,
-    );
-    return handleMessagesOneShot(body, prompt, modelName, isStreaming, res);
-  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-api-key": token,
+    "anthropic-version": ANTHROPIC_API_VERSION,
+    // Enable beta features that OpenClaw may use
+    "anthropic-beta": "interleaved-thinking-2025-05-14,output-128k-2025-02-19",
+  };
 
-  // Get a fresh stream iterator for this turn and send the message
-  const iter = sess.handle.stream();
-  await sess.handle.send(prompt);
+  const response = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+    method: "POST",
+    headers,
+    body,
+  });
 
-  // Collect the assistant response from the session stream
-  let assistantText = "";
-  let inputTokens = 0;
-  let outputTokens = 0;
-
-  try {
-    for await (const raw of consumeUntilResult(iter)) {
-      const m = raw as {
-        type: string;
-        message?: {
-          content?: Array<{ type: string; text?: string }>;
-          usage?: { input_tokens?: number; output_tokens?: number };
-        };
-      };
-      if (m.type === "assistant" && m.message) {
-        for (const block of m.message.content ?? []) {
-          if (block.type === "text" && block.text) {
-            assistantText += block.text;
-          }
-        }
-        if (m.message.usage) {
-          inputTokens = m.message.usage.input_tokens ?? 0;
-          outputTokens = m.message.usage.output_tokens ?? 0;
-        }
-      }
+  // If auth failed, invalidate token cache and return the error
+  if (response.status === 401) {
+    invalidateToken();
+    // Try once more with a fresh token
+    const freshToken = getToken();
+    if (freshToken !== token) {
+      const retryResponse = await fetch(`${ANTHROPIC_API_BASE}/v1/messages`, {
+        method: "POST",
+        headers: { ...headers, "x-api-key": freshToken },
+        body,
+      });
+      return streamResponse(retryResponse, res);
     }
-  } catch (err) {
-    console.error("[claude-code-proxy] session error:", err instanceof Error ? err.message : err);
-    resetSession();
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({ type: "error", error: { type: "server_error", message: String(err) } }),
-      );
-    }
-    return;
   }
 
-  const msgId = `msg_${Date.now()}`;
-  const modelStr = (body.model as string) ?? "sonnet";
-
-  if (!isStreaming) {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        id: msgId,
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: assistantText }],
-        model: modelStr,
-        stop_reason: "end_turn",
-        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-      }),
-    );
-    return;
-  }
-
-  // Streaming: synthesize Anthropic SSE events from the collected response
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
-
-  function sendEvent(eventType: string, data: unknown) {
-    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
-  }
-
-  sendEvent("message_start", {
-    type: "message_start",
-    message: {
-      id: msgId,
-      type: "message",
-      role: "assistant",
-      content: [],
-      model: modelStr,
-      stop_reason: null,
-      usage: { input_tokens: inputTokens, output_tokens: 0 },
-    },
-  });
-  sendEvent("content_block_start", {
-    type: "content_block_start",
-    index: 0,
-    content_block: { type: "text", text: "" },
-  });
-  sendEvent("content_block_delta", {
-    type: "content_block_delta",
-    index: 0,
-    delta: { type: "text_delta", text: assistantText },
-  });
-  sendEvent("content_block_stop", { type: "content_block_stop", index: 0 });
-  sendEvent("message_delta", {
-    type: "message_delta",
-    delta: { stop_reason: "end_turn" },
-    usage: { output_tokens: outputTokens },
-  });
-  sendEvent("message_stop", { type: "message_stop" });
-  res.end();
+  return streamResponse(response, res);
 }
 
 /**
- * Consume messages from the session stream until we hit a `result` message,
- * yielding all non-result messages (stream_event, assistant, etc.).
+ * Stream the Anthropic API response back to the client.
  */
-async function* consumeUntilResult(
-  iter: AsyncGenerator<unknown, void>,
-): AsyncGenerator<unknown, void> {
-  while (true) {
-    const { value, done } = await iter.next();
-    if (done) break;
-    const m = value as { type?: string };
-    if (m.type === "result") {
-      // Turn complete
-      break;
-    }
-    yield value;
+async function streamResponse(response: Response, res: ServerResponse) {
+  // Forward status and relevant headers
+  const contentType = response.headers.get("content-type") ?? "application/json";
+  const responseHeaders: Record<string, string> = {
+    "Content-Type": contentType,
+    "Access-Control-Allow-Origin": "*",
+  };
+
+  // Forward rate limit headers if present
+  for (const header of [
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+    "retry-after",
+  ]) {
+    const value = response.headers.get(header);
+    if (value) responseHeaders[header] = value;
   }
-}
 
-function resetSession() {
-  if (session) {
-    try {
-      session.handle.close();
-    } catch {
-      // ignore
-    }
-    session = null;
+  if (contentType.includes("text/event-stream")) {
+    responseHeaders["Cache-Control"] = "no-cache";
+    responseHeaders["Connection"] = "keep-alive";
   }
-}
 
-/**
- * Fallback: one-shot query() for when the persistent session fails.
- */
-async function handleMessagesOneShot(
-  body: Record<string, unknown>,
-  prompt: string,
-  modelName: string,
-  isStreaming: boolean,
-  res: ServerResponse,
-) {
-  const sdk = await loadSdk();
-  const q = sdk.query({
-    prompt,
-    options: {
-      model: modelName,
-      tools: [],
-      disallowedTools: [
-        "Read",
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "Bash",
-        "Glob",
-        "Grep",
-        "WebFetch",
-        "WebSearch",
-        "TodoRead",
-        "TodoWrite",
-        "NotebookRead",
-        "NotebookEdit",
-        "Agent",
-        "AskUserQuestion",
-      ],
-      maxTurns: 1,
-      persistSession: false,
-      includePartialMessages: true,
-      systemPrompt: typeof body.system === "string" ? body.system : undefined,
-    },
-  });
+  res.writeHead(response.status, responseHeaders);
 
-  if (!isStreaming) {
-    let text = "";
-    let inputTokens = 0;
-    let outputTokens = 0;
-    for await (const msg of q) {
-      if (msg.type === "stream_event") {
-        const event = msg.event;
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          text += event.delta.text;
-        }
-      } else if (msg.type === "assistant" && msg.message.usage) {
-        inputTokens = msg.message.usage.input_tokens ?? 0;
-        outputTokens = msg.message.usage.output_tokens ?? 0;
-      }
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        id: `msg_${Date.now()}`,
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text }],
-        model: (body.model as string) ?? "sonnet",
-        stop_reason: "end_turn",
-        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-      }),
-    );
+  if (!response.body) {
+    const text = await response.text();
+    res.end(text);
     return;
   }
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-  });
-  function sendEvent(eventType: string, data: unknown) {
-    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
-  }
-  for await (const msg of q) {
-    if (msg.type === "stream_event") {
-      sendEvent(msg.event.type, msg.event);
+  // Stream the response body through
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
     }
+  } finally {
+    reader.releaseLock();
+    res.end();
   }
-  res.end();
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse) {
@@ -399,12 +191,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
+    const hasToken = readTokenFromKeychain() !== null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
-        status: "ok",
+        status: hasToken ? "ok" : "no_token",
         provider: "claude-code",
-        persistent_session: session !== null,
+        auth: hasToken ? "keychain" : "missing",
       }),
     );
     return;
@@ -421,11 +214,21 @@ export function getProxyPort(): number {
 export async function startProxy(): Promise<void> {
   if (serverInstance) return;
 
+  // Verify token is available (non-fatal — proxy can still start,
+  // requests will fail with auth error at call time)
+  try {
+    getToken();
+  } catch (err) {
+    console.error(`[claude-code-proxy] warning: ${err instanceof Error ? err.message : err}`);
+  }
+
   return new Promise((resolve, reject) => {
     const server = createServer(handleRequest);
     server.listen(PROXY_PORT, "127.0.0.1", () => {
       serverInstance = server;
-      console.error(`[claude-code-proxy] listening on http://127.0.0.1:${PROXY_PORT}`);
+      console.error(
+        `[claude-code-proxy] listening on http://127.0.0.1:${PROXY_PORT} (auth=keychain)`,
+      );
       resolve();
     });
     server.on("error", (err) => {
@@ -442,7 +245,6 @@ export async function startProxy(): Promise<void> {
 }
 
 export function stopProxy(): void {
-  resetSession();
   serverInstance?.close();
   serverInstance = null;
 }

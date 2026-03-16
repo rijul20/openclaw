@@ -17,31 +17,31 @@ import { getProxyPort, startProxy } from "./proxy.js";
 
 const PROVIDER_ID = "claude-code";
 
-// Model ID → Claude Code SDK model name
+// Model ID → Claude Code SDK model name (used by wrapStreamFn path)
 const MODEL_MAP: Record<string, string> = {
-  sonnet: "sonnet",
-  opus: "opus",
-  haiku: "haiku",
+  "claude-sonnet-4-6": "sonnet",
+  "claude-opus-4-6": "opus",
+  "claude-haiku-4-5-20251001": "haiku",
 };
 
 const MODELS = [
   {
-    id: "sonnet",
-    name: "Claude Sonnet (Claude Code)",
+    id: "claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6 (Claude Code)",
     reasoning: true,
     contextWindow: 200_000,
     maxTokens: 16_384,
   },
   {
-    id: "opus",
-    name: "Claude Opus (Claude Code)",
+    id: "claude-opus-4-6",
+    name: "Claude Opus 4.6 (Claude Code)",
     reasoning: true,
     contextWindow: 200_000,
     maxTokens: 16_384,
   },
   {
-    id: "haiku",
-    name: "Claude Haiku (Claude Code)",
+    id: "claude-haiku-4-5-20251001",
+    name: "Claude Haiku 4.5 (Claude Code)",
     reasoning: false,
     contextWindow: 200_000,
     maxTokens: 8_192,
@@ -339,7 +339,7 @@ const claudeCodePlugin = {
                   },
                 },
               ],
-              defaultModel: `${PROVIDER_ID}/sonnet`,
+              defaultModel: `${PROVIDER_ID}/claude-sonnet-4-6`,
             };
           },
         },
@@ -348,9 +348,13 @@ const claudeCodePlugin = {
         order: "simple",
         run: async () => {
           // Start the local proxy so the Anthropic Messages API transport
-          // can reach Claude Code. This is the fallback path for OpenClaw
-          // versions that don't support wrapStreamFn.
-          await startProxy();
+          // can reach Claude Code. Non-fatal if it fails (e.g. in tests).
+          try {
+            await startProxy();
+          } catch {
+            // Proxy start failed — models still show in catalog,
+            // but requests will fail until proxy is available.
+          }
           return {
             provider: {
               baseUrl: `http://127.0.0.1:${getProxyPort()}`,
