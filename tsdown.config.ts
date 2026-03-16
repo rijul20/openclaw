@@ -153,7 +153,7 @@ export default defineConfig([
     entry: bundledPluginBuildEntries,
     outDir: "dist",
     deps: {
-      neverBundle: ["@lancedb/lancedb"],
+      neverBundle: ["@lancedb/lancedb", "@anthropic-ai/claude-agent-sdk"],
     },
   }),
   nodeBuildConfig({

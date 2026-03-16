@@ -1,0 +1,9 @@
+{
+  "id": "claude-code-provider",
+  "providers": ["claude-code"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

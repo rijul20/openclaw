@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/claude-code-provider",
+  "version": "2026.3.14",
+  "private": true,
+  "description": "OpenClaw Claude Code provider plugin — uses Claude Code subscription as LLM backend",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.76"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
