@@ -13,6 +13,7 @@ import {
   type OpenClawPluginApi,
   type ProviderAuthContext,
 } from "openclaw/plugin-sdk/core";
+import { getProxyPort, startProxy } from "./proxy.js";
 
 const PROVIDER_ID = "claude-code";
 
@@ -157,7 +158,8 @@ function createClaudeCodeStreamFn(): StreamFn {
     const sdkModelName = MODEL_MAP[model.id] ?? "sonnet";
     const prompt = messagesToPrompt(context);
 
-    let q: AsyncGenerator<unknown, void>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let q: AsyncGenerator<any, void>;
     try {
       // Await the SDK import so subprocess startup happens before
       // the stream is returned to the consumer.
@@ -344,23 +346,29 @@ const claudeCodePlugin = {
       ],
       catalog: {
         order: "simple",
-        run: async () => ({
-          provider: {
-            baseUrl: "local://claude-code",
-            apiKey: "claude-code-local",
-            api: "anthropic-messages" as const,
-            models: MODELS.map((m) => ({
-              id: m.id,
-              name: m.name,
+        run: async () => {
+          // Start the local proxy so the Anthropic Messages API transport
+          // can reach Claude Code. This is the fallback path for OpenClaw
+          // versions that don't support wrapStreamFn.
+          await startProxy();
+          return {
+            provider: {
+              baseUrl: `http://127.0.0.1:${getProxyPort()}`,
+              apiKey: "claude-code-local",
               api: "anthropic-messages" as const,
-              reasoning: m.reasoning,
-              input: ["text" as const, "image" as const],
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-              contextWindow: m.contextWindow,
-              maxTokens: m.maxTokens,
-            })),
-          },
-        }),
+              models: MODELS.map((m) => ({
+                id: m.id,
+                name: m.name,
+                api: "anthropic-messages" as const,
+                reasoning: m.reasoning,
+                input: ["text" as const, "image" as const],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: m.contextWindow,
+                maxTokens: m.maxTokens,
+              })),
+            },
+          };
+        },
       },
       wrapStreamFn: () => createClaudeCodeStreamFn(),
     });
