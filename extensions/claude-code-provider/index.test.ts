@@ -106,7 +106,7 @@ describe("claude-code provider plugin", () => {
       tools: [],
     };
 
-    const stream = streamFn(model, context);
+    const stream = await streamFn(model, context);
     const events = [];
     for await (const event of stream) {
       events.push(event);
@@ -215,7 +215,7 @@ describe("claude-code provider plugin", () => {
       tools: [],
     };
 
-    const stream = streamFn(model, context);
+    const stream = await streamFn(model, context);
     const events = [];
     for await (const event of stream) {
       events.push(event);

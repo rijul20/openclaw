@@ -127,52 +127,74 @@ function makePartial(model: { api: string; provider: string; id: string }): Assi
   };
 }
 
+// Pre-load the SDK module so subsequent calls don't pay the import cost
+let sdkPromise: Promise<typeof import("@anthropic-ai/claude-agent-sdk")> | null = null;
+function loadSdk() {
+  if (!sdkPromise) {
+    sdkPromise = import("@anthropic-ai/claude-agent-sdk");
+  }
+  return sdkPromise;
+}
+
 /**
  * Create a StreamFn that routes through Claude Code via the Agent SDK.
  *
  * Each call spawns a Claude Code subprocess. All Claude Code tools are
  * disabled so it acts as a pure reasoning engine — OpenClaw's own tools
  * handle actions.
+ *
+ * Returns async — the runner awaits the SDK subprocess startup before
+ * consuming the stream, avoiding first-token timeout issues.
  */
 function createClaudeCodeStreamFn(): StreamFn {
-  return (
+  return async (
     model: { api: string; provider: string; id: string },
     context: Context,
     _options?: SimpleStreamOptions,
   ) => {
     const stream = createAssistantMessageEventStream();
-
+    const partial = makePartial(model);
     const sdkModelName = MODEL_MAP[model.id] ?? "sonnet";
     const prompt = messagesToPrompt(context);
 
-    // Run the SDK query asynchronously, pushing events into the stream.
+    let q: AsyncGenerator<unknown, void>;
+    try {
+      // Await the SDK import so subprocess startup happens before
+      // the stream is returned to the consumer.
+      const { query } = await loadSdk();
+
+      q = query({
+        prompt,
+        options: {
+          model: sdkModelName,
+          disallowedTools: DISALLOWED_TOOLS,
+          tools: [], // no tools at all
+          includePartialMessages: true,
+          maxTurns: 1, // single reasoning turn
+          persistSession: false, // ephemeral, no disk state
+          systemPrompt: context.systemPrompt,
+        },
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("[claude-code-provider] setup error:", errMsg);
+      const errPartial = makePartial(model);
+      errPartial.stopReason = "error";
+      errPartial.errorMessage = errMsg;
+      stream.push({ type: "error", reason: "error", error: errPartial });
+      return stream;
+    }
+
+    // Pump SDK events into the stream asynchronously.
     (async () => {
       try {
-        // Dynamic import to avoid loading the SDK at plugin registration time
-        const { query } = await import("@anthropic-ai/claude-agent-sdk");
-
-        const partial = makePartial(model);
         stream.push({ type: "start", partial });
 
         let contentIndex = 0;
         let currentText = "";
 
-        const q = query({
-          prompt,
-          options: {
-            model: sdkModelName,
-            disallowedTools: DISALLOWED_TOOLS,
-            tools: [], // no tools at all
-            includePartialMessages: true,
-            maxTurns: 1, // single reasoning turn
-            persistSession: false, // ephemeral, no disk state
-            systemPrompt: context.systemPrompt,
-          },
-        });
-
         for await (const message of q) {
           if (message.type === "stream_event") {
-            // SDKPartialAssistantMessage — contains a BetaRawMessageStreamEvent
             const event = message.event;
 
             if (event.type === "content_block_start") {
@@ -228,7 +250,6 @@ function createClaudeCodeStreamFn(): StreamFn {
                 });
               }
             } else if (event.type === "message_delta") {
-              // Update stop reason from the message delta
               const delta = event.delta as unknown as Record<string, unknown>;
               if (delta.stop_reason === "end_turn" || delta.stop_reason === "stop") {
                 partial.stopReason = "stop";
@@ -237,7 +258,6 @@ function createClaudeCodeStreamFn(): StreamFn {
               } else if (delta.stop_reason === "tool_use") {
                 partial.stopReason = "toolUse";
               }
-              // Update usage from the message delta if present
               const deltaUsage = (event as unknown as Record<string, unknown>).usage as
                 | Record<string, number>
                 | undefined;
@@ -246,8 +266,6 @@ function createClaudeCodeStreamFn(): StreamFn {
               }
             }
           } else if (message.type === "assistant") {
-            // SDKAssistantMessage — final completed message
-            // Usage from the BetaMessage
             const betaMsg = message.message;
             if (betaMsg.usage) {
               partial.usage.input = betaMsg.usage.input_tokens ?? 0;
@@ -261,12 +279,9 @@ function createClaudeCodeStreamFn(): StreamFn {
                 partial.usage.cacheRead +
                 partial.usage.cacheWrite;
             }
-          } else if (message.type === "result") {
-            // Query complete — ignore, we'll push done below
           }
         }
 
-        // Finalize
         stream.push({
           type: "done",
           reason: partial.stopReason === "length" ? "length" : "stop",
@@ -275,13 +290,10 @@ function createClaudeCodeStreamFn(): StreamFn {
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error("[claude-code-provider] stream error:", errMsg);
-        if (err instanceof Error && err.stack) {
-          console.error("[claude-code-provider] stack:", err.stack);
-        }
-        const partial = makePartial(model);
-        partial.stopReason = "error";
-        partial.errorMessage = errMsg;
-        stream.push({ type: "error", reason: "error", error: partial });
+        const errPartial = makePartial(model);
+        errPartial.stopReason = "error";
+        errPartial.errorMessage = errMsg;
+        stream.push({ type: "error", reason: "error", error: errPartial });
       }
     })();
 
@@ -307,9 +319,8 @@ const claudeCodePlugin = {
           hint: "Uses your local Claude Code installation and subscription",
           kind: "custom" as const,
           run: async (_ctx: ProviderAuthContext) => {
-            // Verify Claude Code is available by attempting a minimal import
             try {
-              await import("@anthropic-ai/claude-agent-sdk");
+              await loadSdk();
             } catch {
               throw new Error(
                 "Claude Code SDK not available. Install it with: npm install -g @anthropic-ai/claude-code",
