@@ -6,13 +6,18 @@
  * thinking, images — using the user's Claude Code subscription billing
  * instead of a separate API key.
  *
- * The OAuth token is read from the macOS Keychain (Claude Code stores it
- * under "Claude Code-credentials"). Token refresh is handled by falling
- * back to the Claude Code SDK when the token expires.
+ * The OAuth token is read from:
+ * - macOS: Keychain ("Claude Code-credentials")
+ * - Linux/WSL: plaintext file (~/.claude/.credentials.json)
+ *
+ * Token refresh is handled automatically when Claude Code is in active use.
  */
 
 import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { homedir, platform } from "node:os";
+import { join } from "node:path";
 
 const PROXY_PORT = 18990;
 const ANTHROPIC_API_BASE = "https://api.anthropic.com";
@@ -21,8 +26,12 @@ const ANTHROPIC_API_VERSION = "2023-06-01";
 let serverInstance: ReturnType<typeof createServer> | null = null;
 let cachedToken: string | null = null;
 
+type CredentialData = {
+  claudeAiOauth?: { accessToken?: string };
+};
+
 /**
- * Read the OAuth access token from the macOS Keychain.
+ * macOS: read from Keychain.
  */
 function readTokenFromKeychain(): string | null {
   try {
@@ -30,13 +39,34 @@ function readTokenFromKeychain(): string | null {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
-    const parsed = JSON.parse(raw) as {
-      claudeAiOauth?: { accessToken?: string };
-    };
-    return parsed.claudeAiOauth?.accessToken ?? null;
+    return (JSON.parse(raw) as CredentialData).claudeAiOauth?.accessToken ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Linux/WSL: read from plaintext credentials file.
+ */
+function readTokenFromFile(): string | null {
+  try {
+    const credPath = join(homedir(), ".claude", ".credentials.json");
+    const raw = readFileSync(credPath, "utf-8");
+    return (JSON.parse(raw) as CredentialData).claudeAiOauth?.accessToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the OAuth token using the appropriate method for the current platform.
+ */
+function readToken(): string | null {
+  if (platform() === "darwin") {
+    return readTokenFromKeychain();
+  }
+  // Linux, WSL, and other platforms: try plaintext file
+  return readTokenFromFile();
 }
 
 /**
@@ -44,7 +74,7 @@ function readTokenFromKeychain(): string | null {
  */
 function getToken(): string {
   if (cachedToken) return cachedToken;
-  const token = readTokenFromKeychain();
+  const token = readToken();
   if (!token) {
     throw new Error(
       "Claude Code OAuth token not found in Keychain. Make sure Claude Code is installed and authenticated.",
@@ -191,7 +221,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   }
 
   if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
-    const hasToken = readTokenFromKeychain() !== null;
+    const hasToken = readToken() !== null;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
