@@ -1,0 +1,17 @@
+{
+  "users": {
+    "alice": {
+      "workspace": "./agents/alice",
+      "model": "sonnet",
+      "channels": {
+        "telegram": { "botToken": "YOUR_TELEGRAM_BOT_TOKEN" },
+        "whatsapp": { "authDir": "./agents/alice/whatsapp-auth" },
+        "slack": {
+          "botToken": "xoxb-YOUR-SLACK-BOT-TOKEN",
+          "appToken": "xapp-YOUR-SLACK-APP-TOKEN"
+        }
+      }
+    }
+  },
+  "qrPort": 3847
+}
