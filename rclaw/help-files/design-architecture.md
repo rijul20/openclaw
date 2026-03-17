@@ -117,8 +117,11 @@ Contact CLAUDE.md includes detection rules. If triggered → `[BLOCK_CONTACT]` �
 - **Audit trail** — orchestrator-written conversation.log per contact, append-only, timestamped
 - **15-min idle cleanup** — contact sessions closed after 15min, resumed on next message (~8s)
 - **90s stream timeout** — filler message + auto-recovery on hangs
+- **Contact context persistence** — on session expiry or restart, new sessions get task history + last 20 lines of conversation.log re-injected via session.send()
+- **Task hydration from disk** — in-memory contactTasks map repopulated from tasks.log when contact messages after restart
+- **Rate limiting (loop detection)** — 15 messages per contact per 5-minute sliding window. On trigger: polite pause to contact, [Rate limit] alert to owner with "might be automated agent" warning. Self-heals when window clears.
 
-## Test Results (2026-03-17)
+## Test Results (2026-03-18)
 
 | Test                             | Result                             | Impact                       |
 | -------------------------------- | ---------------------------------- | ---------------------------- |
@@ -127,6 +130,66 @@ Contact CLAUDE.md includes detection rules. If triggered → `[BLOCK_CONTACT]` �
 | macOS sandbox-exec               | ✅ Blocks cross-user reads         | Security model confirmed     |
 | Hierarchical CLAUDE.md           | ❌ Parent not loaded in V2         | Use session.send() injection |
 | Engram CLI save/search           | ✅ ~120ms, project isolation works | Memory layer confirmed       |
+| Contact context persistence      | ✅ Task + conversation re-injected | Survives restart + expiry    |
+| Rate limiting (loop detection)   | ✅ 15/5min, pause + owner alert    | Agent-to-agent safe          |
+| 3-party live e2e (Telegram bots) | ✅ Owner + contact + agent bots    | Full pipeline verified       |
+
+## Operational Policies
+
+### File Cleanup
+
+- Files in `~/.rclaw/agents/<user>/files/` auto-deleted after 7 days
+- Agent can save important files to `memory/` to preserve them
+- Cron runs daily
+
+### Circuit Breaker
+
+- After 3 consecutive session failures within 60 seconds, stop retrying
+- Notify user: "I'm temporarily unavailable, please try again in a few minutes"
+- Resume on next incoming message after cooldown
+
+### Telegram Access Control
+
+- Owner Telegram user ID whitelisted in config (`ownerId` field)
+- All other Telegram users silently ignored
+- Contact routing is WhatsApp-only (Telegram bots are 1:1 private, no third-party contact model)
+
+### Personality Re-injection
+
+- On every session resume (not just first create), re-read CLAUDE.md and inject via `session.send()`
+- Ensures identity updates take effect without requiring fresh session creation
+
+### Filler Timing
+
+- Send filler immediately on first message receipt (before batch timer fires)
+- Don't wait for batch + processing to start — user needs instant acknowledgment
+
+### Contact Rate Limiting
+
+- 15 messages per contact per 5-minute sliding window
+- On trigger: contact gets "I need a moment to catch up", owner gets `[Rate limit]` alert
+- Self-heals: old timestamps prune automatically, no permanent block
+- Prevents agent-to-agent infinite loops when our agent talks to another system's agent
+
+### Contact Session Expiry Recovery
+
+- When a contact messages after their session expired (idle timeout, restart, server-side expiry):
+  1. Task hydrated from last entry in `tasks.log` on disk
+  2. `resumeSession()` attempted; on failure, stale ID cleared and fresh session created
+  3. New session injected with: personality + task history + last 20 lines of `conversation.log`
+- No context loss across restarts or week-long gaps
+
+## Channel-Specific Limitations
+
+| Capability       | Telegram                                         | WhatsApp                          |
+| ---------------- | ------------------------------------------------ | --------------------------------- |
+| Owner routing    | By Telegram user ID                              | By phone number                   |
+| Contact routing  | Not supported (1:1 bot)                          | By phone number (owner vs others) |
+| File receive     | 20 MB limit (Bot API)                            | No practical limit                |
+| File send        | Via sendDocument/sendPhoto                       | Via sendMessage with media        |
+| Typing indicator | "typing..." action (5s TTL, we refresh every 4s) | "composing" presence              |
+| Message editing  | Supported (can update filler → real response)    | Not supported                     |
+| Read receipts    | Not available via Bot API                        | Available (blue ticks)            |
 
 ## Reference Implementations
 
