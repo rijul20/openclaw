@@ -7,6 +7,7 @@ export interface TelegramConfig {
 
 export interface WhatsAppConfig {
   authDir: string;
+  ownerNumber: string; // e.g. "+919876543210" — the owner's phone number
 }
 
 export interface SlackConfig {

@@ -18,7 +18,15 @@ export class TelegramChannel implements ChannelAdapter {
       const text = ctx.message.text;
       console.log(`[${this.userId}][telegram] Received: ${text.slice(0, 80)}`);
 
+      // Show "typing..." immediately
+      await ctx.replyWithChatAction("typing").catch(() => {});
+      // Keep typing indicator alive every 4s while processing
+      const typingInterval = setInterval(() => {
+        ctx.replyWithChatAction("typing").catch(() => {});
+      }, 4000);
+
       this.onMessage(text, async (reply) => {
+        clearInterval(typingInterval);
         await ctx.reply(reply, { parse_mode: "Markdown" }).catch(async () => {
           // Fallback without markdown if parsing fails
           await ctx.reply(reply);

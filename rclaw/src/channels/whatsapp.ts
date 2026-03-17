@@ -1,4 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
 import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -8,7 +10,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import type { WhatsAppConfig } from "../config.js";
-import type { ChannelAdapter, MessageHandler } from "./types.js";
+import type { ChannelAdapter, WhatsAppMessageHandler } from "./types.js";
 
 export class WhatsAppChannel implements ChannelAdapter {
   private sock: WASocket | null = null;
@@ -18,8 +20,9 @@ export class WhatsAppChannel implements ChannelAdapter {
   constructor(
     private userId: string,
     private config: WhatsAppConfig,
-    private onMessage: MessageHandler,
+    private onMessage: WhatsAppMessageHandler,
     private onQr?: (qr: string) => void,
+    private filesDir?: string,
   ) {}
 
   async start() {
@@ -71,17 +74,13 @@ export class WhatsAppChannel implements ChannelAdapter {
       }
     });
 
-    this.sock.ev.on("messages.upsert", ({ messages, type }) => {
+    this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
       if (type !== "notify") {
         return;
       }
 
       for (const msg of messages) {
         if (msg.key.fromMe) {
-          continue;
-        }
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
-        if (!text) {
           continue;
         }
 
@@ -91,9 +90,55 @@ export class WhatsAppChannel implements ChannelAdapter {
         }
         this.lastJid = jid;
 
+        // Extract text from various message types
+        let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+        const caption =
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
+          msg.message?.documentMessage?.caption ||
+          "";
+
+        // Handle media messages — download to workspace and tell the agent
+        const mediaType =
+          (msg.message?.imageMessage && "image") ||
+          (msg.message?.videoMessage && "video") ||
+          (msg.message?.audioMessage && "audio") ||
+          (msg.message?.documentMessage && "document") ||
+          null;
+
+        if (mediaType && this.filesDir) {
+          try {
+            const buffer = await downloadMediaMessage(msg, "buffer", {});
+            const ext = this.getFileExtension(msg, mediaType);
+            const filename = `${Date.now()}-${mediaType}${ext}`;
+            const filepath = join(this.filesDir, filename);
+            mkdirSync(this.filesDir, { recursive: true });
+            writeFileSync(filepath, buffer);
+
+            const fileNote = `[File received: ${mediaType} saved at ${filepath}. Use the Read tool to open it.]`;
+            text = caption ? `${caption}\n\n${fileNote}` : fileNote;
+            console.log(`[${this.userId}][whatsapp] Saved ${mediaType}: ${filename}`);
+          } catch (err) {
+            console.error(`[${this.userId}][whatsapp] Failed to download media:`, err);
+            if (caption) {
+              text = caption;
+            }
+          }
+        } else if (!text && caption) {
+          text = caption;
+        }
+
+        if (!text) {
+          continue;
+        }
+
         console.log(`[${this.userId}][whatsapp] Received: ${text.slice(0, 80)}`);
 
-        this.onMessage(text, async (reply) => {
+        // Show "composing..." immediately
+        await this.sock!.sendPresenceUpdate("composing", jid).catch(() => {});
+
+        this.onMessage(jid, text, async (reply) => {
+          await this.sock!.sendPresenceUpdate("paused", jid).catch(() => {});
           await this.sock!.sendMessage(jid, { text: reply });
         });
       }
@@ -106,10 +151,38 @@ export class WhatsAppChannel implements ChannelAdapter {
     this.connected = false;
   }
 
+  private getFileExtension(msg: { message?: Record<string, unknown> }, mediaType: string): string {
+    if (mediaType === "document") {
+      const docMsg = msg.message?.documentMessage as { fileName?: string } | undefined;
+      if (docMsg?.fileName) {
+        const dot = docMsg.fileName.lastIndexOf(".");
+        if (dot >= 0) {
+          return docMsg.fileName.slice(dot);
+        }
+      }
+    }
+    const defaults: Record<string, string> = {
+      image: ".jpg",
+      video: ".mp4",
+      audio: ".ogg",
+      document: ".bin",
+    };
+    return defaults[mediaType] ?? "";
+  }
+
   async sendMessage(text: string) {
     if (!this.sock || !this.lastJid) {
       throw new Error("No WhatsApp connection or chat available");
     }
     await this.sock.sendMessage(this.lastJid, { text });
+  }
+
+  async sendToContact(to: string, text: string) {
+    if (!this.sock) {
+      throw new Error("WhatsApp not connected");
+    }
+    // Normalize phone number to WhatsApp JID format
+    const jid = to.includes("@") ? to : `${to.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
+    await this.sock.sendMessage(jid, { text });
   }
 }
