@@ -543,6 +543,72 @@ describe("E2E: Contact returns after session expired", () => {
   }, 25000);
 });
 
+describe("E2E: Contact rate limiting (loop detection)", () => {
+  it("pauses contact after too many rapid messages and alerts owner", async () => {
+    const config = makeConfig();
+    const orch = new Orchestrator(config);
+    const mockWa = createMockChannel("whatsapp");
+    orch.registerChannel("alice", "whatsapp", mockWa);
+    await orch.initOwnerSession("alice");
+
+    const router = orch.createWhatsAppRouter("alice");
+    const allReplies: string[] = [];
+
+    // Send 16 messages rapidly (limit is 15 per 5 min)
+    for (let i = 0; i < 16; i++) {
+      router(`917777777777@s.whatsapp.net`, `Message ${i + 1}`, async (text) => {
+        allReplies.push(text);
+      });
+    }
+
+    // Wait for batch processing
+    await new Promise((r) => setTimeout(r, 8000));
+
+    // The 16th message should have been rate limited
+    // Check that a rate-limit reply was sent
+    const rateLimitReply = allReplies.find((r) => r.includes("catch up"));
+    expect(rateLimitReply).toBeDefined();
+
+    // Owner should have received a rate limit alert
+    const ownerLog = getSessionLog().find((s) => s.key === "owner:alice");
+    const alerts = ownerLog?.messages.filter((m) => m.includes("[Rate limit]")) ?? [];
+    expect(alerts.length).toBeGreaterThan(0);
+    expect(alerts[0]).toContain("917777777777");
+    expect(alerts[0]).toContain("automated agent");
+
+    await orch.shutdown();
+  }, 15000);
+
+  it("allows messages under the rate limit", async () => {
+    const config = makeConfig();
+    const orch = new Orchestrator(config);
+    const mockWa = createMockChannel("whatsapp");
+    orch.registerChannel("alice", "whatsapp", mockWa);
+    await orch.initOwnerSession("alice");
+
+    const router = orch.createWhatsAppRouter("alice");
+    const replies: string[] = [];
+
+    // Send 5 messages (well under the 15 limit)
+    for (let i = 0; i < 5; i++) {
+      router(`916666666666@s.whatsapp.net`, `Hi ${i + 1}`, async (text) => {
+        replies.push(text);
+      });
+    }
+
+    await new Promise((r) => setTimeout(r, 8000));
+
+    // All messages should have gotten responses (no rate limit hit)
+    const rateLimitReply = replies.find((r) => r.includes("catch up"));
+    expect(rateLimitReply).toBeUndefined();
+
+    // Contact session should exist
+    expect(getSessionLog().some((s) => s.key.includes("916666666666"))).toBe(true);
+
+    await orch.shutdown();
+  }, 15000);
+});
+
 describe("E2E: Custom personality responders", () => {
   it("owner session uses configured personality", async () => {
     setOwnerResponder((msg) => {

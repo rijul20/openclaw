@@ -14,6 +14,9 @@ const CLAUDE_BINARY = "/Users/rijul/.local/share/claude/versions/2.1.77";
 const BATCH_DELAY_MS = 3500;
 const STREAM_TIMEOUT_MS = 90_000;
 const CONTACT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+// Loop detection: max exchanges per contact within a sliding window
+const CONTACT_RATE_LIMIT_MAX = 15; // max messages
+const CONTACT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // within 5 minutes
 const FILLER_MESSAGES = [
   "One sec...",
   "Let me think...",
@@ -75,6 +78,8 @@ export class Orchestrator {
   private blockedContacts = new Map<string, boolean>();
   // Contact idle cleanup timers
   private idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Contact rate limiting: key → timestamps of recent messages
+  private contactMessageTimes = new Map<string, number[]>();
   // Scheduler ref
   private scheduler: Scheduler | null = null;
 
@@ -474,6 +479,17 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
       return;
     }
 
+    // Rate limit check: prevent runaway loops (e.g. agent-to-agent)
+    if (this.isContactRateLimited(userId, phone)) {
+      console.log(`[${userId}][contact:${phone}] Rate limited — too many messages, pausing.`);
+      await reply("I need a moment to catch up. Please give me a minute!").catch(() => {});
+      // Alert owner about the rapid-fire contact
+      const alert = `[Rate limit] Contact +${phone} sent ${CONTACT_RATE_LIMIT_MAX}+ messages in ${CONTACT_RATE_LIMIT_WINDOW_MS / 60000} minutes. Might be an automated agent. Conversation paused.`;
+      await this.sendToOwnerSession(userId, alert);
+      return;
+    }
+    this.recordContactMessage(userId, phone);
+
     const key = `contact:${userId}:${phone}`;
 
     this.pendingReplies.set(key, { text, reply, channelName });
@@ -848,6 +864,32 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
     const lines = content.split("\n");
     const recent = lines.slice(-maxLines);
     return recent.join("\n");
+  }
+
+  // --- Contact rate limiting ---
+
+  private isContactRateLimited(userId: string, phone: string): boolean {
+    const key = `${userId}:${phone}`;
+    const times = this.contactMessageTimes.get(key);
+    if (!times) {
+      return false;
+    }
+
+    const now = Date.now();
+    const cutoff = now - CONTACT_RATE_LIMIT_WINDOW_MS;
+    // Count messages within the window
+    const recent = times.filter((t) => t > cutoff);
+    // Update the array (prune old timestamps)
+    this.contactMessageTimes.set(key, recent);
+
+    return recent.length >= CONTACT_RATE_LIMIT_MAX;
+  }
+
+  private recordContactMessage(userId: string, phone: string) {
+    const key = `${userId}:${phone}`;
+    const times = this.contactMessageTimes.get(key) ?? [];
+    times.push(Date.now());
+    this.contactMessageTimes.set(key, times);
   }
 
   // --- Idle cleanup ---
