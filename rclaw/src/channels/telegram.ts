@@ -3,6 +3,7 @@ import type { TelegramConfig } from "../config.js";
 import type { ChannelAdapter, MessageHandler } from "./types.js";
 
 export class TelegramChannel implements ChannelAdapter {
+  readonly channelName = "telegram";
   private bot: Bot;
   private lastChatId: number | null = null;
 
@@ -68,5 +69,12 @@ export class TelegramChannel implements ChannelAdapter {
       throw new Error("No chat ID available — user hasn't messaged yet");
     }
     await this.bot.api.sendMessage(this.lastChatId, text);
+  }
+
+  async sendFiller(text: string) {
+    if (!this.lastChatId) {
+      return;
+    }
+    await this.bot.api.sendMessage(this.lastChatId, text).catch(() => {});
   }
 }

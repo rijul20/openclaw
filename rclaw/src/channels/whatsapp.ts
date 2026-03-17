@@ -13,6 +13,7 @@ import type { WhatsAppConfig } from "../config.js";
 import type { ChannelAdapter, WhatsAppMessageHandler } from "./types.js";
 
 export class WhatsAppChannel implements ChannelAdapter {
+  readonly channelName = "whatsapp";
   private sock: WASocket | null = null;
   private lastJid: string | null = null;
   private connected = false;
@@ -109,7 +110,10 @@ export class WhatsAppChannel implements ChannelAdapter {
         if (mediaType && this.filesDir) {
           try {
             const buffer = await downloadMediaMessage(msg, "buffer", {});
-            const ext = this.getFileExtension(msg, mediaType);
+            const ext = this.getFileExtension(
+              msg as { message?: Record<string, unknown> },
+              mediaType,
+            );
             const filename = `${Date.now()}-${mediaType}${ext}`;
             const filepath = join(this.filesDir, filename);
             mkdirSync(this.filesDir, { recursive: true });
@@ -184,5 +188,12 @@ export class WhatsAppChannel implements ChannelAdapter {
     // Normalize phone number to WhatsApp JID format
     const jid = to.includes("@") ? to : `${to.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
     await this.sock.sendMessage(jid, { text });
+  }
+
+  async sendFiller(text: string) {
+    if (!this.sock || !this.lastJid) {
+      return;
+    }
+    await this.sock.sendMessage(this.lastJid, { text }).catch(() => {});
   }
 }

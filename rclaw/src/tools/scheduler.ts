@@ -106,9 +106,8 @@ export class Scheduler {
           this.save(userId);
 
           console.log(`[scheduler] Firing task for ${userId}: "${task.task}"`);
-          this.orchestrator
-            .routeMessage(userId, `[Scheduled Task] ${task.task}`, async () => {})
-            .catch((err) => console.error(`[scheduler] Error running task:`, err));
+          const handler = this.orchestrator.createOwnerMessageHandler(userId);
+          handler(`[Scheduled Task] ${task.task}`, async () => {});
         }
       }
     }

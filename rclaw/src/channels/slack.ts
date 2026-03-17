@@ -3,6 +3,7 @@ import type { SlackConfig } from "../config.js";
 import type { ChannelAdapter, MessageHandler } from "./types.js";
 
 export class SlackChannel implements ChannelAdapter {
+  readonly channelName = "slack";
   private app: App;
   private lastChannel: string | null = null;
   private lastThreadTs: string | null = null;
