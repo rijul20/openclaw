@@ -473,6 +473,76 @@ describe("E2E: Conversation audit trail", () => {
   }, 15000);
 });
 
+describe("E2E: Contact returns after session expired", () => {
+  it("re-creates session with task + conversation history from disk", async () => {
+    const config = makeConfig();
+    const orch = new Orchestrator(config);
+    const mockWa = createMockChannel("whatsapp");
+    orch.registerChannel("alice", "whatsapp", mockWa);
+    await orch.initOwnerSession("alice");
+
+    // Phase 1: Initial contact conversation (establishes task + history)
+    await orch.sendToContact(
+      "alice",
+      "whatsapp",
+      "+919876000000",
+      "Check on the catering order",
+      "Catering order follow-up for Saturday event",
+    );
+
+    const { replies: r1, replyFn: rf1 } = collectReplies();
+    const router = orch.createWhatsAppRouter("alice");
+    router("919876000000@s.whatsapp.net", "Yes the catering is confirmed for 50 people", rf1);
+    await new Promise((r) => setTimeout(r, 8000));
+    expect(r1.length).toBeGreaterThan(0);
+
+    // Verify task + conversation exist on disk
+    const contactDir = join(ALICE_WORKSPACE, "contacts", "919876000000");
+    expect(existsSync(join(contactDir, "tasks.log"))).toBe(true);
+    expect(existsSync(join(contactDir, "conversation.log"))).toBe(true);
+
+    // Phase 2: Simulate "a week later" — shutdown destroys in-memory state
+    await orch.shutdown();
+    resetMockSdk();
+    // Simulate server-side session expiry: remove stored contact session ID
+    // (In production, unstable_v2_resumeSession would throw; here we just clear the ID
+    // so ensureContactSession takes the "create new + inject context" path)
+    const { removeSession: rmSess } = await import("../../src/session-store.js");
+    rmSess("contact:alice:919876000000");
+
+    // Phase 3: New orchestrator (simulates server restart after a week)
+    const orch2 = new Orchestrator(config);
+    const mockWa2 = createMockChannel("whatsapp");
+    orch2.registerChannel("alice", "whatsapp", mockWa2);
+    await orch2.initOwnerSession("alice");
+
+    // Contact messages again — no in-memory task, session ID may be stale
+    const { replies: r2, replyFn: rf2 } = collectReplies();
+    const router2 = orch2.createWhatsAppRouter("alice");
+    router2("919876000000@s.whatsapp.net", "Hey, can we add 10 more plates?", rf2);
+    await new Promise((r) => setTimeout(r, 8000));
+
+    // Contact should get a response (not an error)
+    expect(r2.length).toBeGreaterThan(0);
+
+    // New session should have been injected with context from disk
+    const contactLog = getSessionLog().find((s) => s.key === "contact:alice:919876000000");
+    expect(contactLog).toBeDefined();
+    // The [System] injection should contain the task and conversation history
+    const systemMsg = contactLog!.messages.find((m) => m.startsWith("[System]"));
+    expect(systemMsg).toBeDefined();
+    expect(systemMsg).toContain("Catering order follow-up");
+    expect(systemMsg).toContain("catering is confirmed");
+
+    // Owner should still get a summary
+    const ownerLog = getSessionLog().find((s) => s.key === "owner:alice");
+    const summaries = ownerLog?.messages.filter((m) => m.includes("[Contact update")) ?? [];
+    expect(summaries.length).toBeGreaterThan(0);
+
+    await orch2.shutdown();
+  }, 25000);
+});
+
 describe("E2E: Custom personality responders", () => {
   it("owner session uses configured personality", async () => {
     setOwnerResponder((msg) => {

@@ -5,7 +5,7 @@ import { BatchTimer } from "./batch-timer.js";
 import type { ChannelAdapter } from "./channels/types.js";
 import type { Config } from "./config.js";
 import { createSandboxWrapper } from "./sandbox.js";
-import { loadSessions, saveSession } from "./session-store.js";
+import { loadSessions, saveSession, removeSession } from "./session-store.js";
 import type { Scheduler } from "./tools/scheduler.js";
 
 // --- Constants ---
@@ -149,6 +149,10 @@ export class Orchestrator {
 
   /**
    * Create or resume a contact session on demand.
+   * Handles three cases:
+   *   1. Session is live in memory → reuse it
+   *   2. Session ID stored on disk → resume it (may fail if expired server-side)
+   *   3. No stored session → create new and inject personality + task + history
    */
   private async ensureContactSession(userId: string, phone: string): Promise<SDKSession> {
     const key = `contact:${userId}:${phone}`;
@@ -167,6 +171,9 @@ export class Orchestrator {
     const contactDir = this.getContactDir(userId, phone);
     this.ensureContactWorkspace(userId, phone);
 
+    // Hydrate in-memory task from disk if missing (survives restarts)
+    this.hydrateContactTask(userId, phone);
+
     const sdk = await import("@anthropic-ai/claude-agent-sdk");
     const stored = loadSessions();
     const sandboxWrapper = createSandboxWrapper(contactDir, CLAUDE_BINARY);
@@ -179,27 +186,44 @@ export class Orchestrator {
     };
 
     let session: SDKSession;
+    let isNewSession = false;
+
     if (stored[key]) {
-      console.log(`[${userId}][contact:${phone}] Resuming session...`);
-      session = await withCwdMutex(contactDir, () =>
-        sdk.unstable_v2_resumeSession(stored[key], sessionOpts),
-      );
+      // Try to resume — may fail if session expired server-side
+      try {
+        console.log(`[${userId}][contact:${phone}] Resuming session...`);
+        session = await withCwdMutex(contactDir, () =>
+          sdk.unstable_v2_resumeSession(stored[key], sessionOpts),
+        );
+        const sessionId = await this.drainUntilReady(session, key);
+        saveSession(key, sessionId);
+      } catch {
+        console.log(
+          `[${userId}][contact:${phone}] Resume failed (session expired?), creating fresh.`,
+        );
+        removeSession(key);
+        session = await withCwdMutex(contactDir, () => sdk.unstable_v2_createSession(sessionOpts));
+        const sessionId = await this.drainUntilReady(session, key);
+        saveSession(key, sessionId);
+        isNewSession = true;
+      }
     } else {
       console.log(`[${userId}][contact:${phone}] Creating session...`);
       session = await withCwdMutex(contactDir, () => sdk.unstable_v2_createSession(sessionOpts));
+      const sessionId = await this.drainUntilReady(session, key);
+      saveSession(key, sessionId);
+      isNewSession = true;
     }
 
-    const sessionId = await this.drainUntilReady(session, key);
-    saveSession(key, sessionId);
     this.sessions.set(key, { session, lastActivity: Date.now() });
 
-    // Inject personality + task context for new sessions
-    if (!stored[key]) {
-      await this.injectContactPersonality(userId, phone, session);
+    // Inject personality + context for new sessions (or expired-then-recreated)
+    if (isNewSession) {
+      await this.injectContactContext(userId, phone, session);
     }
 
     this.resetIdleTimer(key);
-    console.log(`[${userId}][contact:${phone}] Session ready (${sessionId.slice(0, 8)})`);
+    console.log(`[${userId}][contact:${phone}] Session ready`);
     return session;
   }
 
@@ -237,7 +261,11 @@ export class Orchestrator {
     await this.drainResult(session);
   }
 
-  private async injectContactPersonality(
+  /**
+   * Inject full context into a new/recreated contact session:
+   * personality + current task + task history + recent conversation.
+   */
+  private async injectContactContext(
     userId: string,
     phone: string,
     session: SDKSession,
@@ -245,7 +273,21 @@ export class Orchestrator {
     const taskKey = `${userId}:${phone}`;
     const task = this.contactTasks.get(taskKey) || "";
     const personality = this.getContactPersonality(phone, task);
-    await session.send(`[System] ${personality}`);
+
+    // Load conversation history from disk for context continuity
+    const contactDir = this.getContactDir(userId, phone);
+    const historySnippet = this.loadRecentConversation(contactDir, 20);
+    const tasksLog = this.loadTasksLog(contactDir);
+
+    let prompt = `[System] ${personality}`;
+    if (tasksLog) {
+      prompt += `\n\n## Task History\n${tasksLog}`;
+    }
+    if (historySnippet) {
+      prompt += `\n\n## Recent Conversation (for context — do not repeat these messages)\n${historySnippet}`;
+    }
+
+    await session.send(prompt);
     await this.drainResult(session);
   }
 
@@ -679,6 +721,7 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
     const key = `contact:${userId}:${phone}`;
     console.log(`[${key}] Attempting contact session recovery...`);
     this.closeSession(key);
+    removeSession(key); // Clear stale ID so ensureContactSession creates fresh
 
     try {
       const session = await this.ensureContactSession(userId, phone);
@@ -749,6 +792,62 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
     const logPath = join(contactDir, "conversation.log");
     const timestamp = new Date().toISOString();
     appendFileSync(logPath, `[${timestamp}] ${sender}: ${text}\n\n`);
+  }
+
+  /**
+   * Load the last task from tasks.log into the in-memory contactTasks map.
+   * Called when a contact messages after a restart (map is empty but disk has history).
+   */
+  private hydrateContactTask(userId: string, phone: string) {
+    const taskKey = `${userId}:${phone}`;
+    if (this.contactTasks.has(taskKey)) {
+      return;
+    }
+
+    const contactDir = this.getContactDir(userId, phone);
+    const tasksLogPath = join(contactDir, "tasks.log");
+    if (!existsSync(tasksLogPath)) {
+      return;
+    }
+
+    const lines = readFileSync(tasksLogPath, "utf-8").trim().split("\n").filter(Boolean);
+    if (lines.length === 0) {
+      return;
+    }
+
+    // Extract task text from last line: "[2026-03-18T10:00:00Z] Check flight PNR"
+    const lastLine = lines[lines.length - 1];
+    const match = lastLine.match(/^\[.*?\]\s*(.+)$/);
+    if (match) {
+      this.contactTasks.set(taskKey, match[1]);
+      console.log(
+        `[${userId}][contact:${phone}] Hydrated task from disk: "${match[1].slice(0, 60)}"`,
+      );
+    }
+  }
+
+  /** Load tasks.log content for injection into session context. */
+  private loadTasksLog(contactDir: string): string {
+    const path = join(contactDir, "tasks.log");
+    if (!existsSync(path)) {
+      return "";
+    }
+    return readFileSync(path, "utf-8").trim();
+  }
+
+  /** Load the last N lines of conversation.log for context re-injection. */
+  private loadRecentConversation(contactDir: string, maxLines: number): string {
+    const path = join(contactDir, "conversation.log");
+    if (!existsSync(path)) {
+      return "";
+    }
+    const content = readFileSync(path, "utf-8").trim();
+    if (!content) {
+      return "";
+    }
+    const lines = content.split("\n");
+    const recent = lines.slice(-maxLines);
+    return recent.join("\n");
   }
 
   // --- Idle cleanup ---
