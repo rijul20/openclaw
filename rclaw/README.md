@@ -1,13 +1,14 @@
 # rclaw
 
-Multi-user AI agent orchestrator. Connects Claude Code to Telegram, WhatsApp, and Slack so your AI assistant can manage conversations with you and your contacts autonomously.
+Multi-user AI agent orchestrator. Connects Claude Code to Telegram, WhatsApp, and Slack so your AI agent can manage conversations with you and your contacts autonomously.
 
 ## What it does
 
-- **Owner conversations** — message your AI assistant (Ayesha) through Telegram, WhatsApp, or Slack. She has a persistent session with full conversation history.
-- **Contact delegation** — tell your assistant to message someone on your behalf. She creates an isolated session for that contact with its own personality, task context, and security guardrails.
+- **Owner conversations** — message your AI agent through Telegram, WhatsApp, or Slack. Persistent session with full conversation history.
+- **Contact delegation** — tell your agent to message someone on your behalf. It creates an isolated session for that contact with its own task context and security guardrails.
 - **Contact replies** — when a contact replies, they talk to an isolated agent that only knows the assigned task. Summaries are fed back to the owner.
 - **Multi-user** — multiple users share one rclaw instance, fully isolated from each other.
+- **Persona-based** — agents are built from persona templates (assistant, coach, ops) and personalized with identity (name, language, tone).
 
 ## Quick start
 
@@ -63,24 +64,27 @@ Edit `config.json`:
 | `channels.slack.appToken`       | Slack app token (`xapp-...`) for socket mode                                       |
 | `qrPort`                        | Port for WhatsApp QR pairing web UI                                                |
 
-### 3. Set up agent personality
+### 3. Design your agent's personality
 
-Create your agent's personality file:
+The easiest way — use the interactive personality designer:
+
+```bash
+npm run design -- ./agents/alice
+```
+
+It asks 13 questions (persona, name, language, tone, humor, brevity, etc.) and generates a `CLAUDE.md` + `fillers.txt` matching your choices.
+
+Or create manually:
 
 ```bash
 mkdir -p agents/alice
 cat > agents/alice/CLAUDE.md << 'EOF'
-You are Ayesha, a warm and professional personal AI assistant.
+# IDENTITY.md
+- **Name:** Ayesha
+- **Language:** English with Hindi mixed in naturally
+- **Tone:** Warm + slightly sarcastic
 
-## Personality
-- Warm, polite, and efficient
-- Use natural English with light Hindi where appropriate
-- Keep messages concise — this is chat, not email
-- Always use "Aap" — never "Tu" or "Tum"
-
-## About your owner
-- Name: Alice
-- Timezone: IST
+# Include the rest from personas/assistant/CLAUDE.md
 EOF
 ```
 
@@ -98,7 +102,26 @@ npx pm2 start ecosystem.config.cjs
 
 ### 5. Message your bot
 
-Open Telegram, find your bot, send `/start`, then say hello. Ayesha should respond.
+Open Telegram, find your bot, send `/start`, then say hello.
+
+## Personas
+
+Agents are built from **persona templates** — pre-configured behaviour patterns that you personalize with your identity.
+
+```
+Persona (template)       → Directives, values, capabilities
+  + Identity (yours)     → Name, language, tone, humor, cultural context
+    + Model (config)     → sonnet / opus / haiku
+      = Your Agent
+```
+
+| Persona       | Description                                                        | Status                                |
+| ------------- | ------------------------------------------------------------------ | ------------------------------------- |
+| **assistant** | Personal AI assistant. Tasks, contacts, calendar, conversations.   | Active (82% behaviour test pass rate) |
+| coach         | Reflective coach. Asks questions, nudges growth, tracks goals.     | Planned                               |
+| ops           | Operations manager. Task-focused, structured, minimal personality. | Planned                               |
+
+Base templates live in `personas/`. See `personas/README.md` for details.
 
 ## Adding WhatsApp
 
@@ -146,6 +169,7 @@ You → "Ask Priya to confirm catering"
 - Prompt injection detection auto-blocks malicious contacts
 - Blocked contacts are silently ignored forever
 - Rate limiting prevents agent-to-agent conversation loops (15 messages per 5 minutes)
+- Context persists across restarts — task history + conversation log re-injected on session expiry
 
 ## Architecture
 
@@ -164,39 +188,56 @@ Telegram/WhatsApp/Slack
 ### Key design decisions
 
 - **V2 Session API** — persistent Claude Code subprocess per entity, no cold start
+- **Persona templates** — behaviour directives (B1-B13) tested and validated per persona
 - **File-based outbox** — agent writes JSON to `outbox/`, no Bash needed
 - **OS sandbox per session** — macOS `sandbox-exec`, Linux `bwrap`
 - **Message batching** — 3.5s silence window combines rapid messages
 - **Session persistence** — `sessions.json` survives restarts, `resumeSession()` restores context
 - **Context persistence** — task history + conversation log re-injected on session expiry
 - **Rate limiting** — 15 messages per contact per 5 minutes, owner alerted on trigger
+- **Personality-driven fillers** — progress messages loaded from `fillers.txt`, matching agent language
 
 ### File layout
 
 ```
+rclaw/
+  personas/                    # Persona templates
+    assistant/CLAUDE.md        #   Base assistant behaviour + directives
+  src/                         # Source code
+  tests/
+    behaviour/                 #   Sonnet-based persona behaviour tests
+    e2e/                       #   Integration + live Telegram tests
+  help-files/
+    architecture/              #   System + agent behaviour architecture docs
+    historical-context/        #   Pre-implementation research & decisions
+
 ~/.rclaw/
-  sessions.json              # Session IDs for resume
-  sandbox/                   # Generated sandbox wrapper scripts
+  sessions.json                # Session IDs for resume
+  sandbox/                     # Generated sandbox wrapper scripts
   agents/<user>/
-    CLAUDE.md                # Agent personality
-    outbox/                  # Agent writes JSON here to send messages
-    memory/                  # Agent's own notes
-    files/                   # Received media
+    CLAUDE.md                  # Personalized agent (persona + identity)
+    fillers.txt                # Personality-driven progress messages
+    outbox/                    # Agent writes JSON here to send messages
+    memory/                    # Agent's own notes
+    files/                     # Received media
     contacts/<phone>/
-      CLAUDE.md              # Security rules (orchestrator-written)
-      tasks.log              # Task history with this contact
-      conversation.log       # Full transcript (audit trail)
-      profile.md             # Contact observations (agent-written)
-      BLOCKED                # Present if contact was blocked
+      CLAUDE.md                # Security rules (orchestrator-written)
+      tasks.log                # Task history with this contact
+      conversation.log         # Full transcript (audit trail)
+      profile.md               # Contact observations (agent-written)
+      BLOCKED                  # Present if contact was blocked
 ```
 
 ## Testing
 
 ```bash
-# Unit + integration tests (mock SDK)
+# Unit + integration tests (mock SDK, 49 tests)
 npm test
 
-# Include live Telegram bot tests (requires bot tokens + /start)
+# Behaviour tests — real Sonnet, validates persona directives (28 tests)
+BEHAVIOUR=1 npm run test:behaviour
+
+# Live Telegram bot tests (requires bot tokens + /start)
 LIVE=1 npm test
 ```
 
@@ -226,8 +267,10 @@ Each user gets their own bot, workspace, sessions, and sandbox. Zero shared stat
 ## Development
 
 ```bash
-npm run dev          # Watch mode (auto-restart on changes)
-npm start            # Single run
-npm test             # Vitest
-npx tsc --noEmit     # Type check
+npm run dev              # Watch mode (auto-restart on changes)
+npm start                # Single run
+npm test                 # Unit + integration tests
+npm run test:behaviour   # Persona behaviour tests (requires BEHAVIOUR=1)
+npm run design           # Interactive personality designer
+npx tsc --noEmit         # Type check
 ```
