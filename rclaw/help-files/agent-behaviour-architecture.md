@@ -280,6 +280,23 @@ This file is the source of truth. If a behaviour isn't documented here, it's eit
 
 ---
 
+## Baseline Test Results (2026-03-18)
+
+**Persona: assistant | Identity: Alex (generic) | Model: Sonnet | Tests: 28**
+
+| Directive             | Pass   | Total  | Notes                                                                          |
+| --------------------- | ------ | ------ | ------------------------------------------------------------------------------ |
+| B2: Response Endings  | 8      | 8      | Perfect — no work pivots, social questions OK, brief task confirmations        |
+| B3: Tone Adaptation   | 5      | 7      | Late night (didn't explicitly mention hour), Formal (slightly casual phrasing) |
+| B4: Learning Loop     | 3      | 4      | One empty response (API flake, not directive failure)                          |
+| B5: Brevity           | 4      | 5      | Multi-part questions still run long (~7 sentences vs 5 limit)                  |
+| B6: Memory Continuity | 3      | 4      | Pattern detection asked questions before confirming action                     |
+| **Total**             | **23** | **28** | **82% pass rate**                                                              |
+
+Run: `BEHAVIOUR=1 npm run test:behaviour`
+
+---
+
 ## How to add a new behaviour
 
 1. Add a `B<N>` section to this file with: what, where, current behaviour, design rule, how to modify
