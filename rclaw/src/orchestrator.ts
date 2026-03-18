@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SDKSession, SDKSystemMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKSession } from "@anthropic-ai/claude-agent-sdk";
 import { BatchTimer } from "./batch-timer.js";
 import type { ChannelAdapter } from "./channels/types.js";
 import type { Config } from "./config.js";
@@ -127,11 +127,13 @@ export class Orchestrator {
     };
 
     let session: SDKSession;
+    let isResume = false;
     if (stored[key]) {
       console.log(`[${userId}] Resuming owner session ${stored[key].slice(0, 8)}...`);
       session = await withCwdMutex(userConfig.workspace, () =>
         sdk.unstable_v2_resumeSession(stored[key], sessionOpts),
       );
+      isResume = true;
     } else {
       console.log(`[${userId}] Creating new owner session...`);
       session = await withCwdMutex(userConfig.workspace, () =>
@@ -139,16 +141,16 @@ export class Orchestrator {
       );
     }
 
-    // Drain the init stream to get session ID
-    const sessionId = await this.drainUntilReady(session, key);
-    saveSession(key, sessionId);
     this.sessions.set(key, { session, lastActivity: Date.now() });
 
-    // Inject personality + capabilities
-    if (!stored[key]) {
+    // Inject personality (this triggers the first stream, which yields init + sessionId)
+    if (!isResume) {
       await this.injectOwnerPersonality(userId, session);
     }
 
+    // sessionId is available after the first stream interaction
+    const sessionId = session.sessionId;
+    saveSession(key, sessionId);
     console.log(`[${userId}] Owner session ready (${sessionId.slice(0, 8)})`);
   }
 
@@ -200,60 +202,32 @@ export class Orchestrator {
         session = await withCwdMutex(contactDir, () =>
           sdk.unstable_v2_resumeSession(stored[key], sessionOpts),
         );
-        const sessionId = await this.drainUntilReady(session, key);
-        saveSession(key, sessionId);
       } catch {
         console.log(
           `[${userId}][contact:${phone}] Resume failed (session expired?), creating fresh.`,
         );
         removeSession(key);
         session = await withCwdMutex(contactDir, () => sdk.unstable_v2_createSession(sessionOpts));
-        const sessionId = await this.drainUntilReady(session, key);
-        saveSession(key, sessionId);
         isNewSession = true;
       }
     } else {
       console.log(`[${userId}][contact:${phone}] Creating session...`);
       session = await withCwdMutex(contactDir, () => sdk.unstable_v2_createSession(sessionOpts));
-      const sessionId = await this.drainUntilReady(session, key);
-      saveSession(key, sessionId);
       isNewSession = true;
     }
 
     this.sessions.set(key, { session, lastActivity: Date.now() });
 
-    // Inject personality + context for new sessions (or expired-then-recreated)
+    // Inject personality + context for new sessions (triggers first stream → sessionId)
     if (isNewSession) {
       await this.injectContactContext(userId, phone, session);
     }
 
+    const sessionId = session.sessionId;
+    saveSession(key, sessionId);
     this.resetIdleTimer(key);
-    console.log(`[${userId}][contact:${phone}] Session ready`);
+    console.log(`[${userId}][contact:${phone}] Session ready (${sessionId.slice(0, 8)})`);
     return session;
-  }
-
-  /**
-   * Drain stream until we get the init system message (session ID).
-   * For resumed sessions, sessionId is available immediately.
-   */
-  private async drainUntilReady(session: SDKSession, _key: string): Promise<string> {
-    // For new sessions, we need to drain the init stream
-    // The sessionId getter works after the first message
-    try {
-      for await (const msg of session.stream()) {
-        const m = msg;
-        if (m.type === "system" && (m as SDKSystemMessage).subtype === "init") {
-          return (m as SDKSystemMessage).session_id;
-        }
-        if (m.type === "result") {
-          // Session initialized, result available
-          return session.sessionId;
-        }
-      }
-    } catch {
-      // Session may already be ready (resumed)
-    }
-    return session.sessionId;
   }
 
   // --- Personality injection ---
@@ -588,12 +562,14 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
     console.log(`[${userId}][owner] Processing: "${text.slice(0, 80)}"...`);
     entry.lastActivity = Date.now();
 
-    // Send filler immediately
-    this.sendFiller(userId, channelName);
+    // Only send filler if response takes longer than 5s
+    const fillerTimer = this.scheduleFillerIfSlow(userId, channelName);
 
     try {
       await entry.session.send(text);
-      return await this.consumeStream(entry.session, key, userId, channelName);
+      const result = await this.consumeStream(entry.session, key, userId, channelName);
+      clearTimeout(fillerTimer);
+      return result;
     } catch (err) {
       console.error(`[${key}] Session error, attempting recovery:`, err);
       return await this.recoverSession(key, userId, text, channelName);
@@ -613,12 +589,14 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
     // Ensure session exists (create on demand)
     const session = await this.ensureContactSession(userId, phone);
 
-    // Send filler
-    this.sendFillerToContact(userId, phone, channelName);
+    // Only send filler if response takes longer than 5s
+    const fillerTimer = this.scheduleFillerIfSlow(userId, channelName);
 
     try {
       await session.send(text);
-      return await this.consumeStream(session, key, userId, channelName);
+      const result = await this.consumeStream(session, key, userId, channelName);
+      clearTimeout(fillerTimer);
+      return result;
     } catch (err) {
       console.error(`[${key}] Session error, attempting recovery:`, err);
       return await this.recoverContactSession(userId, phone, text, channelName);
@@ -751,23 +729,24 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
 
   // --- Progress / filler ---
 
-  private sendFiller(userId: string, channelName?: string) {
-    if (!channelName) {
-      return;
-    }
-    const adapter = this.channels.get(userId)?.get(channelName);
-    if (adapter?.sendFiller) {
-      const filler = FILLER_MESSAGES[Math.floor(Math.random() * FILLER_MESSAGES.length)];
-      // Delay filler slightly so it doesn't race with the actual response
-      setTimeout(() => {
-        adapter.sendFiller!(filler).catch(() => {});
-      }, 2000);
-    }
-  }
-
-  private sendFillerToContact(userId: string, _phone: string, channelName?: string) {
-    // Contact fillers go to the contact's chat, which is already the lastJid
-    this.sendFiller(userId, channelName);
+  /**
+   * Schedule a filler message only if the response takes longer than 5s.
+   * Returns the timer handle so the caller can cancel it if the response arrives fast.
+   */
+  private scheduleFillerIfSlow(
+    userId: string,
+    channelName?: string,
+  ): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      if (!channelName) {
+        return;
+      }
+      const adapter = this.channels.get(userId)?.get(channelName);
+      if (adapter?.sendFiller) {
+        const filler = FILLER_MESSAGES[Math.floor(Math.random() * FILLER_MESSAGES.length)];
+        adapter.sendFiller(filler).catch(() => {});
+      }
+    }, 5000);
   }
 
   // --- Contact workspace ---
