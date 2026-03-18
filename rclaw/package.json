@@ -9,6 +9,7 @@
     "start": "tsx src/index.ts",
     "test": "vitest run",
     "test:behaviour": "BEHAVIOUR=1 vitest run tests/behaviour/",
+    "test:uat": "UAT=1 vitest run tests/uat/",
     "test:watch": "vitest"
   },
   "dependencies": {
