@@ -1,101 +1,132 @@
-# Agent Archetypes
+# Agent Archetypes & Persona Architecture
 
-We design two base archetypes. Users pick one and customize the CLAUDE.md identity.
+## How agents are built
 
-## Sonnet Agent (default)
+An agent is: **Persona + Identity + Model + Channels**
 
-- **Model:** `sonnet`
-- **Best for:** Day-to-day EA tasks, messaging, scheduling, quick research, file management
-- **Character:** Fast, responsive, conversational
-- **Cost:** ~5x cheaper than Opus
-- **Latency:** ~5-10s per response
-- **Use when:** Most interactions — chat, reminders, WhatsApp delegation, quick lookups
-
-## Opus Agent
-
-- **Model:** `opus`
-- **Best for:** Deep research, complex analysis, long document processing, strategy, coding
-- **Character:** Thorough, nuanced, better at ambiguity
-- **Cost:** Higher
-- **Latency:** ~15-30s per response
-- **Use when:** Tasks requiring deep reasoning, multi-step planning, working with large documents
-
-## Parameters That Affect Agent Behavior
-
-### 1. Model (`model`)
-
-The biggest lever. Sonnet vs Opus vs Haiku. Affects reasoning depth, cost, and speed.
-
-### 2. Identity (CLAUDE.md)
-
-The personality, rules, tone, and capabilities the agent follows. This is the main customization surface. Same model + different CLAUDE.md = completely different agent.
-
-### 3. Permission Mode (`permissionMode`)
-
-Currently `bypassPermissions` (full tool access). Options:
-
-- `bypassPermissions` — agent can do anything (read/write/bash/web)
-- `default` — asks for permission on risky actions
-- `plan` — read-only, can only suggest actions
-- `acceptEdits` — can read + edit files, but asks before bash/web
-
-This is a major behavior lever — a `plan` mode agent is a pure advisor, `bypassPermissions` is a full autonomous agent.
-
-### 4. Workspace (`cwd`)
-
-What the agent can see and access. Defines the agent's "world." An agent with access to `~/Documents` has very different capabilities than one limited to a small workspace.
-
-### 5. Tools (when MCP is enabled)
-
-Custom tools change what the agent can do — send WhatsApp, schedule tasks, query databases, etc. Two agents with the same model but different tools behave very differently.
-
-### 6. Max Turns (future: `maxTurns`)
-
-Limits how many tool-use rounds the agent can take per message. Low = quick responses, high = deep multi-step work. Not yet exposed in our config but supported by the SDK.
-
-### 7. System Prompt / Append Prompt (future)
-
-The SDK supports `customSystemPrompt` and `appendSystemPrompt` for injecting context beyond CLAUDE.md. Useful for runtime context injection (e.g., RAG results, calendar data).
-
-## Recommended Archetypes
-
-### "EA" (Executive Assistant)
-
-```json
-{
-  "model": "sonnet",
-  "permissionMode": "bypassPermissions"
-}
+```
+Persona (template)       → Directives, values, capabilities, behaviour rules
+  + Identity (user)      → Name, language, tone, humor, cultural context, examples
+    + Model (config)     → sonnet / opus / haiku (cost vs depth tradeoff)
+      + Channels (config)→ Telegram / WhatsApp / Slack
+        = Running Agent
 ```
 
-CLAUDE.md: Conversational, proactive, warm personality. Full tool access for messaging, file management, scheduling.
+## Persona = the behaviour template
 
-### "Analyst"
+A persona defines HOW an agent behaves. It contains all the directives (B1-B13), core values, boundaries, and capability instructions. The persona is personality-agnostic — it works for any name, language, or cultural context.
 
-```json
-{
-  "model": "opus",
-  "permissionMode": "bypassPermissions"
-}
-```
+**Where it lives:** `personas/<name>/CLAUDE.md`
 
-CLAUDE.md: Thorough, methodical, detail-oriented. Used for research tasks, document analysis, strategy work.
+| Persona       | Description                                                                                        | Key directives                                                         | Status                                |
+| ------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------- |
+| **assistant** | Personal AI assistant. Manages tasks, contacts, calendar, conversations. Warm, capable, proactive. | All B1-B13. Outbox for messaging. Contact isolation.                   | Active — 82% behaviour test pass rate |
+| **coach**     | Reflective coach. Asks questions, nudges growth, tracks goals. Doesn't do tasks — guides thinking. | B2 (more questions OK), B3, B4, B5, B6, B11. No outbox/contacts.       | Planned                               |
+| **ops**       | Operations manager. Task-focused, structured, minimal personality. Execution over conversation.    | B3 (always professional), B4, B5 (detailed OK), B7. Outbox + contacts. | Planned                               |
 
-### "Advisor" (read-only)
+### What differs between personas
 
-```json
-{
-  "model": "opus",
-  "permissionMode": "plan"
-}
-```
+| Aspect                  | Assistant                     | Coach                          | Ops                         |
+| ----------------------- | ----------------------------- | ------------------------------ | --------------------------- |
+| Question frequency (B2) | ~5% (don't nag)               | ~60% (questions are the point) | ~10% (confirm then execute) |
+| Default tone (B3)       | Warm + genuine                | Calm + reflective              | Professional + efficient    |
+| Brevity (B5)            | 1-2 sentences                 | 2-3 sentences (reflective)     | Bullet points, structured   |
+| Contacts/outbox (B7)    | Yes                           | No                             | Yes                         |
+| Proactivity             | Anticipate needs              | Nudge growth                   | Execute and report          |
+| Memory focus (B6)       | Preferences, names, decisions | Goals, patterns, progress      | Tasks, deadlines, status    |
 
-CLAUDE.md: Gives recommendations but never takes action. Safe for sensitive contexts where you want analysis without execution.
+### What's the SAME across all personas
 
-## What Stays The Same Across Archetypes
-
+- OS-level filesystem sandbox per session
+- Contact isolation model (separate sessions, security guardrails)
+- Session persistence (sessions.json, resume across restarts)
 - Channel adapters (Telegram, WhatsApp, Slack)
-- Contact isolation model
-- Security guardrails for third-party contacts
-- Workspace structure (memory/, files/, contacts/, etc.)
-- Session persistence
+- Workspace structure (memory/, files/, contacts/, outbox/)
+- Rate limiting (15/5min per contact)
+- Audit trail (conversation.log per contact)
+- Personality-driven fillers (fillers.txt)
+
+## Identity = the personalization layer
+
+Identity is what the USER provides on top of the persona. It makes the agent unique.
+
+**Where it lives:** `~/.rclaw/agents/<user>/CLAUDE.md` (generated by personality designer)
+
+| Identity field   | Example (Ayesha)                                               | Example (Kai)                          |
+| ---------------- | -------------------------------------------------------------- | -------------------------------------- |
+| Name             | Ayesha                                                         | Kai                                    |
+| Language         | English + Hindi (50/50)                                        | English only                           |
+| Tone             | Warm + slightly sarcastic                                      | Calm + minimalist                      |
+| Humor            | Medium (roasts, dry observations)                              | None (straight to the point)           |
+| Cultural context | Indian (Delhi, IST, festivals)                                 | Nordic (direct, no small talk)         |
+| Formality        | Always "Aap" (formal Hindi)                                    | Always casual                          |
+| Emoji            | 🔥                                                             | None                                   |
+| Golden rule      | "If it could've been written by any generic AI, it has failed" | "Efficiency over pleasantries, always" |
+| Examples         | 10 scenario-specific voice samples                             | None needed                            |
+
+**How identity is created:** `npm run design` (personality designer CLI)
+
+## Model = the intelligence lever
+
+The model affects reasoning depth, cost, and speed. Same persona + identity works with any model.
+
+| Model      | Best for                                                   | Latency | Cost         |
+| ---------- | ---------------------------------------------------------- | ------- | ------------ |
+| **sonnet** | Day-to-day: chat, messaging, scheduling, quick tasks       | ~5-10s  | Base         |
+| **opus**   | Deep work: research, analysis, complex documents, strategy | ~15-30s | ~5x sonnet   |
+| **haiku**  | Cron jobs, simple lookups, high-volume low-stakes tasks    | ~2-4s   | ~0.2x sonnet |
+
+## Parameters that affect behaviour
+
+| Parameter       | What it controls                       | Where configured                              |
+| --------------- | -------------------------------------- | --------------------------------------------- |
+| Persona         | Behaviour template (directives B1-B13) | `personas/<name>/CLAUDE.md`                   |
+| Identity        | Name, language, tone, cultural context | `~/.rclaw/agents/<user>/CLAUDE.md`            |
+| Model           | Reasoning depth, cost, speed           | `config.json` → `model`                       |
+| disallowedTools | What the agent can't use               | `src/orchestrator.ts` (owner vs contact)      |
+| Sandbox         | Filesystem boundary                    | `src/sandbox.ts` (auto-generated per session) |
+| Fillers         | Progress messages when slow            | `~/.rclaw/agents/<user>/fillers.txt`          |
+| Channels        | How the user communicates              | `config.json` → `channels`                    |
+
+## Creating a new persona
+
+1. Create `personas/<name>/CLAUDE.md` with behaviour directives
+2. Decide which B1-B13 directives apply and tune their values
+3. Write behaviour tests in `tests/behaviour/`
+4. Run `BEHAVIOUR=1 npm run test:behaviour` to validate
+5. Update the personality designer to offer the persona as a choice
+6. Document in this file and in `help-files/architecture/agent-behaviour.md`
+
+## Recommended configurations
+
+### Personal assistant (default)
+
+```json
+{ "model": "sonnet", "persona": "assistant" }
+```
+
+Conversational, proactive, warm. Full tool access for messaging, files, scheduling.
+
+### Deep work analyst
+
+```json
+{ "model": "opus", "persona": "assistant" }
+```
+
+Same assistant persona but with Opus for complex tasks. Higher cost, better reasoning.
+
+### Accountability coach (planned)
+
+```json
+{ "model": "sonnet", "persona": "coach" }
+```
+
+Asks reflective questions. Tracks goals. Doesn't execute — guides thinking.
+
+### Operations bot (planned)
+
+```json
+{ "model": "haiku", "persona": "ops" }
+```
+
+Minimal personality. Executes tasks, reports status. High volume, low cost.
