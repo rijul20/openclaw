@@ -295,6 +295,12 @@ This file is the source of truth. If a behaviour isn't documented here, it's eit
 
 Run: `BEHAVIOUR=1 npm run test:behaviour`
 
+### B14: Contact Session Behaviour (added post-baseline)
+
+| Directive            | Pass | Total | Notes                                              |
+| -------------------- | ---- | ----- | -------------------------------------------------- |
+| B14: Contact Session | 5    | 5     | No help offers, no internal leaks, natural closure |
+
 ---
 
 ## How to add a new behaviour

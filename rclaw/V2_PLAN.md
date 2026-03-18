@@ -33,6 +33,21 @@ Agent can use `<internal>` tags for private reasoning that gets stripped before 
 - After getting response: `response.replace(/<internal>[\s\S]*?<\/internal>/g, "").trim()`
 - Add directive to persona template: "You can use `<internal>` tags for thinking that won't be shown to the user"
 - **Files:** `src/orchestrator.ts`, `personas/assistant/CLAUDE.md`
+- **Dependent:** 1.5 (proactive contact task summary) depends on this
+
+### 1.5 Proactive Contact Task Summary
+
+**Priority:** Tier 2 | **Effort:** ~30 min | **Depends on:** 1.2 (`<internal>` tags)
+
+When a contact conversation completes, proactively push a synthesized summary to the owner.
+
+- Contact session includes `<internal>TASK_SUMMARY: ...</internal>` in its final message
+- Orchestrator strips `<internal>` from contact-visible response (via 1.2)
+- Orchestrator extracts `TASK_SUMMARY` and sends it to the owner session as a rich update
+- Owner sees: "Shipra's conference ends at 4pm, flight at 6:30 Brussels time"
+- Not the mechanical echo: "They said X, you replied Y"
+- **Files:** `src/orchestrator.ts`, contact personality in `getContactPersonality()`
+- **Test:** UAT scenario — contact completes task → owner gets proactive summary
 
 ### 1.3 File Cleanup Cron
 
