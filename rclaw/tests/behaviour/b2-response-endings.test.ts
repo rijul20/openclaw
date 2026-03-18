@@ -12,10 +12,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { runBehaviourSuite, type BehaviourTest } from "./framework.js";
+import { runBehaviourSuite, ASSISTANT_PERSONA_PATH, type BehaviourTest } from "./framework.js";
 
 const BEHAVIOUR = process.env.BEHAVIOUR === "1";
-const CLAUDE_MD = "/Users/rijul/.rclaw/agents/alice/CLAUDE.md";
+const CLAUDE_MD = ASSISTANT_PERSONA_PATH;
 
 const tests: BehaviourTest[] = [
   {
@@ -90,7 +90,7 @@ const tests: BehaviourTest[] = [
 describe.skipIf(!BEHAVIOUR)("B2: Response Endings", () => {
   it("agent follows response ending rules", async () => {
     console.log("\n=== B2: Response Endings ===\n");
-    const results = await runBehaviourSuite(CLAUDE_MD, tests);
+    const results = await runBehaviourSuite(CLAUDE_MD, tests, true);
 
     const passed = results.filter((r) => r.judgement.pass).length;
     const total = results.length;

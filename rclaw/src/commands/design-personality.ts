@@ -17,6 +17,7 @@ import { createInterface } from "node:readline";
 // --- Types ---
 
 interface DesignState {
+  persona: string;
   name: string;
   age: string;
   background: string;
@@ -51,6 +52,15 @@ interface Question {
 }
 
 const QUESTIONS: Question[] = [
+  {
+    id: "persona",
+    ask: () =>
+      `What kind of agent do you want?\n\n  1. Assistant — personal AI assistant. Manages tasks, contacts, calendar. Warm and capable.\n  2. Coach _(coming soon)_ — reflective coach for personal development\n  3. Ops _(coming soon)_ — operations manager, task-focused, minimal personality\n\nPick a number (only 1 is available now):`,
+    process: (answer, state) => {
+      const personas: Record<string, string> = { "1": "assistant", "2": "coach", "3": "ops" };
+      return { ...state, persona: personas[answer.trim()] || "assistant" };
+    },
+  },
   {
     id: "name",
     ask: () =>

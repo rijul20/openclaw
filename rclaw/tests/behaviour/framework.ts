@@ -12,6 +12,29 @@ import { readFileSync } from "node:fs";
 
 const CLAUDE_BINARY = "/Users/rijul/.local/share/claude/versions/2.1.77";
 
+// Default persona template for testing (tests validate directives, not personal identity)
+export const ASSISTANT_PERSONA_PATH = new URL("../../personas/assistant/CLAUDE.md", import.meta.url)
+  .pathname;
+
+/**
+ * Resolve persona template placeholders with a generic test identity.
+ * Tests validate directives, not personal identity — so we use neutral defaults.
+ */
+export function resolvePersonaTemplate(template: string): string {
+  return template
+    .replace(/\{\{AGENT_NAME\}\}/g, "Alex")
+    .replace(/\{\{AGENT_BACKGROUND\}\}/g, "A capable, warm AI assistant")
+    .replace(/\{\{AGENT_LANGUAGES\}\}/g, "English")
+    .replace(/\{\{AGENT_TONE\}\}/g, "Warm and friendly with light humor")
+    .replace(/\{\{AGENT_HUMOR\}\}/g, "Light humor when it fits")
+    .replace(/\{\{AGENT_FORMALITY\}\}/g, "Formal by default, casual when appropriate")
+    .replace(/\{\{AGENT_EMOJI\}\}/g, "")
+    .replace(
+      /\{\{GOLDEN_RULE[^}]*\}\}/g,
+      "Every message should sound like a real person, not a chatbot.",
+    );
+}
+
 export interface BehaviourTest {
   name: string;
   /** The directive being tested (e.g., "B2: Response Endings") */
@@ -37,10 +60,21 @@ export interface BehaviourResult {
 /**
  * Get a single response from Claude with the agent's personality.
  * Uses unstable_v2_prompt for one-shot (no session state needed).
+ *
+ * @param claudeMdPath - Path to CLAUDE.md (persona template or personalized instance)
+ * @param userMessage - The message to send
+ * @param resolveTemplate - If true, resolve {{PLACEHOLDER}} markers with test defaults
  */
-export async function getAgentResponse(claudeMdPath: string, userMessage: string): Promise<string> {
+export async function getAgentResponse(
+  claudeMdPath: string,
+  userMessage: string,
+  resolveTemplate = false,
+): Promise<string> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
-  const personality = readFileSync(claudeMdPath, "utf-8");
+  let personality = readFileSync(claudeMdPath, "utf-8");
+  if (resolveTemplate) {
+    personality = resolvePersonaTemplate(personality);
+  }
 
   // Use one-shot prompt with personality as the first message context
   const prompt = `[System] You are an AI assistant. Here is your personality and behaviour guide:\n\n${personality}\n\n---\n\nNow respond to this message from your owner. Follow your personality and behaviour rules exactly.\n\nUser: ${userMessage}`;
@@ -127,11 +161,12 @@ Respond in this exact JSON format (no markdown, no code blocks):
 export async function runBehaviourTest(
   claudeMdPath: string,
   test: BehaviourTest,
+  resolveTemplate = false,
 ): Promise<BehaviourResult> {
   console.log(`  Testing: ${test.name}`);
   console.log(`  Message: "${test.userMessage}"`);
 
-  const agentResponse = await getAgentResponse(claudeMdPath, test.userMessage);
+  const agentResponse = await getAgentResponse(claudeMdPath, test.userMessage, resolveTemplate);
   console.log(
     `  Response: "${agentResponse.slice(0, 150)}${agentResponse.length > 150 ? "..." : ""}"`,
   );
@@ -148,10 +183,11 @@ export async function runBehaviourTest(
 export async function runBehaviourSuite(
   claudeMdPath: string,
   tests: BehaviourTest[],
+  resolveTemplate = false,
 ): Promise<BehaviourResult[]> {
   const results: BehaviourResult[] = [];
   for (const test of tests) {
-    const result = await runBehaviourTest(claudeMdPath, test);
+    const result = await runBehaviourTest(claudeMdPath, test, resolveTemplate);
     results.push(result);
     console.log("");
   }
