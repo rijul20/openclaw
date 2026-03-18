@@ -1,15 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { BatchTimer } from "../src/batch-timer.js";
-import { normalizePhone, chunkText } from "../src/orchestrator.js";
-import { createSandboxWrapper } from "../src/sandbox.js";
+import { BatchTimer } from "../../src/batch-timer.js";
+import { normalizePhone, chunkText } from "../../src/orchestrator.js";
+import { createSandboxWrapper } from "../../src/sandbox.js";
 import {
   loadSessions,
   saveSession,
   removeSession,
   setStorePath,
   resetStorePath,
-} from "../src/session-store.js";
+} from "../../src/session-store.js";
 
 // UC1: Basic utility functions
 describe("normalizePhone", () => {

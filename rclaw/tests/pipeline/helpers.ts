@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { ChannelAdapter } from "../src/channels/types.js";
+import type { ChannelAdapter } from "../../src/channels/types.js";
 
 /**
  * Create a mock channel adapter for testing.

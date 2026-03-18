@@ -14,16 +14,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // Mock the SDK BEFORE importing orchestrator
 vi.mock("@anthropic-ai/claude-agent-sdk", () => import("./mock-sdk.js"));
 
-import type { ChannelAdapter } from "../../src/channels/types.js";
-import type { Config } from "../../src/config.js";
-import { Orchestrator } from "../../src/orchestrator.js";
-import { startOutboxWatcher } from "../../src/outbox-watcher.js";
+import type { ChannelAdapter } from "../../../src/channels/types.js";
+import type { Config } from "../../../src/config.js";
+import { Orchestrator } from "../../../src/orchestrator.js";
+import { startOutboxWatcher } from "../../../src/outbox-watcher.js";
 import {
   loadSessions,
   saveSession,
   setStorePath,
   resetStorePath,
-} from "../../src/session-store.js";
+} from "../../../src/session-store.js";
 import {
   resetMockSdk,
   getSessionLog,
@@ -507,7 +507,7 @@ describe("E2E: Contact returns after session expired", () => {
     // Simulate server-side session expiry: remove stored contact session ID
     // (In production, unstable_v2_resumeSession would throw; here we just clear the ID
     // so ensureContactSession takes the "create new + inject context" path)
-    const { removeSession: rmSess } = await import("../../src/session-store.js");
+    const { removeSession: rmSess } = await import("../../../src/session-store.js");
     rmSess("contact:alice:919876000000");
 
     // Phase 3: New orchestrator (simulates server restart after a week)

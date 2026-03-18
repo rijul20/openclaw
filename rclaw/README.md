@@ -171,7 +171,13 @@ You → "Ask Priya to confirm catering"
 - Rate limiting prevents agent-to-agent conversation loops (15 messages per 5 minutes)
 - Context persists across restarts — task history + conversation log re-injected on session expiry
 
-## Architecture
+## Architecture — Four Pillars
+
+The system is organized into four pillars, each with its own architecture doc, tests, and roadmap.
+
+### 1. Core — how the system runs
+
+Orchestrator, sessions, sandbox, batching, contact isolation, rate limiting, persistence, error recovery.
 
 ```
 Telegram/WhatsApp/Slack
@@ -185,31 +191,38 @@ Telegram/WhatsApp/Slack
           → conversation.log (audit trail)
 ```
 
-### Key design decisions
+### 2. Behaviour — how the agent acts
 
-- **V2 Session API** — persistent Claude Code subprocess per entity, no cold start
-- **Persona templates** — behaviour directives (B1-B13) tested and validated per persona
-- **File-based outbox** — agent writes JSON to `outbox/`, no Bash needed
-- **OS sandbox per session** — macOS `sandbox-exec`, Linux `bwrap`
-- **Message batching** — 3.5s silence window combines rapid messages
-- **Session persistence** — `sessions.json` survives restarts, `resumeSession()` restores context
-- **Context persistence** — task history + conversation log re-injected on session expiry
-- **Rate limiting** — 15 messages per contact per 5 minutes, owner alerted on trigger
-- **Personality-driven fillers** — progress messages loaded from `fillers.txt`, matching agent language
+Persona templates, 13 directives (B1-B13), personality designer, behaviour tests.
+
+### 3. Channels — how messages flow
+
+Telegram (grammy), WhatsApp (Baileys + LID routing), Slack (bolt), channel-specific quirks.
+
+### 4. Capabilities — what the agent can do
+
+File read/write, web search, outbox messaging, memory. Future: docs, browser, calendar, email.
+
+See `help-files/architecture/` for detailed docs on each pillar.
 
 ### File layout
 
 ```
 rclaw/
-  personas/                    # Persona templates
-    assistant/CLAUDE.md        #   Base assistant behaviour + directives
   src/                         # Source code
+    orchestrator.ts            #   Core: routing, sessions, batching
+    channels/                  #   Channels: telegram, whatsapp, slack
+    commands/                  #   CLI: personality designer
+  personas/                    # Persona templates
+    assistant/CLAUDE.md        #   Base assistant (34 verified directives)
   tests/
-    behaviour/                 #   Sonnet-based persona behaviour tests
-    e2e/                       #   Integration + live Telegram tests
+    core/                      #   Pillar 1: unit + mock e2e tests
+    behaviour/                 #   Pillar 2: Sonnet-based directive tests
+    channels/                  #   Pillar 3: live Telegram bot tests
+    uat/                       #   All pillars: full pipeline with real Claude
   help-files/
-    architecture/              #   System + agent behaviour architecture docs
-    historical-context/        #   Pre-implementation research & decisions
+    architecture/              #   4 pillar docs (core, behaviour, channels, capabilities)
+    v1-implementation-summary.md
 
 ~/.rclaw/
   sessions.json                # Session IDs for resume

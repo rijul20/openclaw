@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { createSandboxWrapper } from "../src/sandbox.js";
+import { createSandboxWrapper } from "../../src/sandbox.js";
 
 // UC5, UC6: Sandbox isolation
 describe("sandbox isolation", () => {

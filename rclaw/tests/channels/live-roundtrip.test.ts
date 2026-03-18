@@ -59,7 +59,7 @@ import {
   getActiveSessions,
   setOwnerResponder,
   setContactResponder,
-} from "./mock-sdk.js";
+} from "../core/e2e/mock-sdk.js";
 
 // --- Test infrastructure ---
 

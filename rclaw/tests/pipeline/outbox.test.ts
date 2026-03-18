@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect, afterEach } from "vitest";
-import { startOutboxWatcher } from "../src/outbox-watcher.js";
+import { startOutboxWatcher } from "../../src/outbox-watcher.js";
 
 // Each test gets a unique directory
 function makeOutbox() {

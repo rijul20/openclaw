@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { BatchTimer } from "../src/batch-timer.js";
+import { BatchTimer } from "../../src/batch-timer.js";
 
 // UC2: Multiple messages batched into one
 describe("message batching", () => {
