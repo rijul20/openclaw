@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "design": "tsx src/commands/design-personality.ts",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "test": "vitest run",
+    "test:behaviour": "BEHAVIOUR=1 vitest run tests/behaviour/",
     "test:watch": "vitest"
   },
   "dependencies": {
