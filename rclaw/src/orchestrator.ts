@@ -17,7 +17,8 @@ const CONTACT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 // Loop detection: max exchanges per contact within a sliding window
 const CONTACT_RATE_LIMIT_MAX = 15; // max messages
 const CONTACT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // within 5 minutes
-const FILLER_MESSAGES = [
+const FILLER_DELAY_MS = 5000;
+const DEFAULT_FILLERS = [
   "One sec...",
   "Let me think...",
   "Working on it...",
@@ -80,6 +81,8 @@ export class Orchestrator {
   private idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Contact rate limiting: key → timestamps of recent messages
   private contactMessageTimes = new Map<string, number[]>();
+  // Per-user filler messages (loaded from fillers.txt or defaults)
+  private userFillers = new Map<string, string[]>();
   // Scheduler ref
   private scheduler: Scheduler | null = null;
 
@@ -151,6 +154,10 @@ export class Orchestrator {
     // sessionId is available after the first stream interaction
     const sessionId = session.sessionId;
     saveSession(key, sessionId);
+
+    // Load personality-driven fillers from workspace
+    this.loadFillers(userId);
+
     console.log(`[${userId}] Owner session ready (${sessionId.slice(0, 8)})`);
   }
 
@@ -730,8 +737,9 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
   // --- Progress / filler ---
 
   /**
-   * Schedule a filler message only if the response takes longer than 5s.
+   * Schedule a filler message only if the response takes longer than FILLER_DELAY_MS.
    * Returns the timer handle so the caller can cancel it if the response arrives fast.
+   * Uses personality-driven fillers from fillers.txt, falls back to defaults.
    */
   private scheduleFillerIfSlow(
     userId: string,
@@ -743,10 +751,37 @@ ${task || "No specific task assigned. Respond helpfully to the contact."}`;
       }
       const adapter = this.channels.get(userId)?.get(channelName);
       if (adapter?.sendFiller) {
-        const filler = FILLER_MESSAGES[Math.floor(Math.random() * FILLER_MESSAGES.length)];
+        const fillers = this.userFillers.get(userId) ?? DEFAULT_FILLERS;
+        const filler = fillers[Math.floor(Math.random() * fillers.length)];
         adapter.sendFiller(filler).catch(() => {});
       }
-    }, 5000);
+    }, FILLER_DELAY_MS);
+  }
+
+  /**
+   * Load filler messages from the agent's fillers.txt.
+   * Each line is one filler phrase, matching the agent's personality/language.
+   * Falls back to DEFAULT_FILLERS if file missing or empty.
+   */
+  private loadFillers(userId: string) {
+    const userConfig = this.config.users[userId];
+    if (!userConfig) {
+      return;
+    }
+    const fillersPath = join(userConfig.workspace, "fillers.txt");
+    try {
+      const content = readFileSync(fillersPath, "utf-8").trim();
+      const lines = content
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (lines.length > 0) {
+        this.userFillers.set(userId, lines);
+        console.log(`[${userId}] Loaded ${lines.length} personality fillers`);
+        return;
+      }
+    } catch {}
+    console.log(`[${userId}] No fillers.txt found, using defaults`);
   }
 
   // --- Contact workspace ---
