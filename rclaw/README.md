@@ -230,14 +230,25 @@ rclaw/
 
 ## Testing
 
+Three-layer test architecture:
+
+| Layer             | Command                  | Tests | What it validates                                                                    | Cost   |
+| ----------------- | ------------------------ | ----- | ------------------------------------------------------------------------------------ | ------ |
+| **1. Unit + e2e** | `npm test`               | 50    | Pipeline mechanics: routing, batching, session persistence, isolation, rate limiting | Free   |
+| **2. Behaviour**  | `npm run test:behaviour` | 28    | Persona directives: tone, brevity, question frequency, memory handling               | ~$0.50 |
+| **3. UAT**        | `npm run test:uat`       | 10    | Full pipeline with real Claude: context leak, injection detection, audit trail       | ~$1-2  |
+
 ```bash
-# Unit + integration tests (mock SDK, 49 tests)
+# Layer 1: fast, deterministic, every commit
 npm test
 
-# Behaviour tests — real Sonnet, validates persona directives (28 tests)
+# Layer 2: persona directives against real Sonnet
 BEHAVIOUR=1 npm run test:behaviour
 
-# Live Telegram bot tests (requires bot tokens + /start)
+# Layer 3: full pipeline with real Claude — run before releases
+UAT=1 npm run test:uat
+
+# Live Telegram bot tests
 LIVE=1 npm test
 ```
 
