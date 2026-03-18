@@ -90,6 +90,8 @@ export class WhatsAppChannel implements ChannelAdapter {
           continue;
         }
         this.lastJid = jid;
+        // Use senderPn (phone number) for routing when available (LID JIDs don't contain phone)
+        const senderJid = (msg.key as { senderPn?: string }).senderPn || jid;
 
         // Extract text from various message types
         let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
@@ -141,7 +143,7 @@ export class WhatsAppChannel implements ChannelAdapter {
         // Show "composing..." immediately
         await this.sock!.sendPresenceUpdate("composing", jid).catch(() => {});
 
-        this.onMessage(jid, text, async (reply) => {
+        this.onMessage(senderJid, text, async (reply) => {
           await this.sock!.sendPresenceUpdate("paused", jid).catch(() => {});
           await this.sock!.sendMessage(jid, { text: reply });
         });
