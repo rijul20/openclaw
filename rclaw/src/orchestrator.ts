@@ -17,7 +17,7 @@ const CONTACT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 // Loop detection: max exchanges per contact within a sliding window
 const CONTACT_RATE_LIMIT_MAX = 15; // max messages
 const CONTACT_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // within 5 minutes
-const FILLER_DELAY_MS = 5000;
+const FILLER_DELAY_MS = 15000;
 const DEFAULT_FILLERS = [
   "One sec...",
   "Let me think...",
